@@ -52,6 +52,22 @@ selection to the exact millisecond.
 
 Roughly: overview bar = *where*, big canvas = *exactly where*.
 
+## Install
+
+Grab a binary from the [releases page](https://github.com/winter-loo/wavemark/releases) — no
+Rust toolchain needed:
+
+| platform | file |
+|---|---|
+| Linux x86_64 | `wavemark-v0.1.0-rc.1-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS Apple silicon | `wavemark-v0.1.0-rc.1-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `wavemark-v0.1.0-rc.1-x86_64-apple-darwin.tar.gz` |
+| Windows x86_64 | `wavemark-v0.1.0-rc.1-x86_64-pc-windows-msvc.zip` |
+
+Each archive contains both `wavemark` (CLI) and `wavemark-ui` (GUI), plus a
+`.sha256` checksum. On macOS you may need to right-click → Open the first time,
+since the binaries aren't notarised yet.
+
 ## Quick start
 
 ```sh

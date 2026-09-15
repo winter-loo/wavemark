@@ -1,0 +1,224 @@
+name: release
+
+# Builds release binaries for every supported platform and attaches them to a
+# GitHub release.
+#
+# Two triggers:
+#   - push a `v*` tag    -> normal release
+#   - workflow_dispatch  -> rebuild an existing tag without moving it
+#
+# A tag containing a hyphen (`v0.1.0-rc.1`) is published as a pre-release;
+# anything else (`v0.1.0`) is a full release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build, e.g. v0.1.0-rc.1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    # One platform failing shouldn't cancel the others — a broken Windows build
+    # is no reason to withhold the macOS binary.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # gpui-kit links against these directly. The list below is the one that
+      # actually links `wavemark-ui` on ubuntu-22.04 — `libxkbcommon-x11-dev`,
+      # `libfontconfig1-dev` and `libfreetype6-dev` are all required at *link*
+      # time, not just build time, so omitting any of them fails in the final
+      # step rather than during compilation.
+      - name: Install Linux display/system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-x11-dev libx11-dev libxext-dev libxft-dev \
+            libxinerama-dev libxcursor-dev libxrender-dev libxfixes-dev \
+            libwayland-dev libxkbfile-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libssl-dev libasound2-dev pkg-config cmake
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }} \
+            -p wavemark-cli -p wavemark-ui
+
+      - name: Package (unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          name="wavemark-$tag-${{ matrix.target }}"
+          mkdir -p "staging/$name"
+          for b in wavemark wavemark-ui; do
+            cp "target/${{ matrix.target }}/release/$b" "staging/$name/"
+          done
+          cp README.md LICENSE "staging/$name/"
+          tar -czf "$name.tar.gz" -C staging "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - name: Package (windows)
+        if: matrix.archive == 'zip'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          name="wavemark-$tag-${{ matrix.target }}"
+          mkdir -p "staging/$name"
+          for b in wavemark wavemark-ui; do
+            cp "target/${{ matrix.target }}/release/$b.exe" "staging/$name/"
+          done
+          cp README.md LICENSE "staging/$name/"
+          (cd staging && 7z a "../$name.zip" "$name")
+          echo "$(sha256sum "$name.zip" | cut -d' ' -f1)  $name.zip" > "$name.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+            *.zip
+            *.zip.sha256
+          if-no-files-found: error
+
+  # Smoke-test the binaries on the machine that built them before publishing.
+  # Catches "it compiled but immediately segfaults" — cheap insurance.
+  smoke:
+    name: smoke (${{ matrix.target }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist
+
+      - name: Unpack (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cd dist && tar -xzf *.tar.gz
+          echo "$(pwd)/wavemark-*-$(echo ${{ matrix.target }})" >> "$GITHUB_PATH"
+
+      - name: Unpack (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd dist && 7z x *.zip
+          echo "$(pwd)/wavemark-*-${{ matrix.target }}" >> "$GITHUB_PATH"
+
+      - name: wavemark --version
+        shell: bash
+        run: wavemark --version
+
+      - name: Round-trip a generated file
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A 1s tone, 1s silence, 1s tone — enough to exercise decode,
+          # silence detection, annotation writing and export.
+          python3 - <<'PY'
+          import math, struct, wave
+          sr = 44100
+          tone = lambda f: [0.6*math.sin(2*math.pi*f*i/sr) for i in range(sr)]
+          s = tone(440) + [0.0]*sr + tone(660)
+          w = wave.open('clip.wav','w'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+          w.writeframes(b''.join(struct.pack('<h', int(max(-1,min(1,x))*32767)) for x in s)); w.close()
+          PY
+          wavemark -f clip.wav info
+          wavemark -f clip.wav silence --sound --write
+          wavemark -f clip.wav annotations --format json > notes.json
+          test "$(python3 -c 'import json;print(len(json.load(open("notes.json"))["annotations"]))')" = "2"
+          wavemark -f clip.wav batch-export -o out >/dev/null
+          test -f out/manifest.json
+          echo "smoke test passed"
+
+  release:
+    name: publish
+    needs: [build, smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: Collect checksums
+        run: |
+          cd dist
+          cat *.sha256 | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Is this a pre-release?
+        id: kind
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          if [[ "$tag" == *-* ]]; then
+            echo "prerelease=true"  >> "$GITHUB_OUTPUT"
+            echo "title=$tag (pre-release)" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "title=$tag" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ steps.kind.outputs.title }}
+          prerelease: ${{ steps.kind.outputs.prerelease }}
+          generate_release_notes: true
+          files: |
+            dist/*

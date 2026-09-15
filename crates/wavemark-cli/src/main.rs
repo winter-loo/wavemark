@@ -281,7 +281,14 @@ fn main() -> Result<()> {
             let audio = audio_path(cli_audio.as_deref(), session.as_ref())?;
             split_cmd(&audio, session.as_ref(), out, *parts, at)
         }
-        Command::Info => print_info(need(&session)?),
+        Command::Info => {
+            // `info` is usually the very first thing anyone runs against a new
+            // file, so it must work before a sidecar exists — synthesise the
+            // session from the audio rather than demanding one.
+            let audio = audio_path(cli_audio.as_deref(), session.as_ref())?;
+            let s = ensure_session(&mut session, &audio)?;
+            print_info(s)
+        }
         Command::List => print_list(need(&session)?),
         Command::Concat { .. } => unreachable!("handled above"),
     }
