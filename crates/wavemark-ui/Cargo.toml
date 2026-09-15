@@ -1,0 +1,18 @@
+[package]
+name = "wavemark-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "GPU-accelerated wavemark GUI built with gpui-kit"
+repository.workspace = true
+
+[[bin]]
+name = "wavemark-ui"
+path = "src/main.rs"
+
+[dependencies]
+wavemark-core = { workspace = true, features = ["audio"] }
+anyhow = { workspace = true }
+gpui-kit = "0.6"

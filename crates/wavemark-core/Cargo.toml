@@ -1,0 +1,29 @@
+[package]
+name = "wavemark-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Core data model, session format, and audio engine for wavemark"
+repository.workspace = true
+
+[features]
+# `audio` pulls in the symphonia decoder + hound WAV encoder. It is needed by the
+# CLI `export` subcommand and by the GUI. The pure data model is always available.
+default = []
+audio = ["dep:symphonia", "dep:hound"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# 0.5 has the stable, well-documented decoder API (0.6 rewrote it).
+symphonia = { version = "0.5", features = ["mp3", "wav", "flac", "pcm", "aac", "isomp4", "vorbis", "ogg"], optional = true }
+hound = { version = "3.5", optional = true }
+
+[dev-dependencies]
+tempfile = "3"

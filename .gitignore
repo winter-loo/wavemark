@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.aac
+*.wavemark.json
+!tests/fixtures/**/*.wav

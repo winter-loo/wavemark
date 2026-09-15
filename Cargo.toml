@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/wavemark-core",
+    "crates/wavemark-cli",
+    "crates/wavemark-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+authors = ["wavemark contributors"]
+description = "A GPU-accelerated, CLI-friendly audio editor built for human↔AI-agent collaboration"
+readme = "README.md"
+# repository is filled in after the GitHub repo is created
+repository = "https://github.com/wavemark-app/wavemark"
+homepage = "https://github.com/wavemark-app/wavemark"
+keywords = ["audio", "waveform", "gpu", "gpui", "cli"]
+categories = ["multimedia::audio", "command-line-utilities"]
+
+[workspace.dependencies]
+wavemark-core = { path = "crates/wavemark-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
