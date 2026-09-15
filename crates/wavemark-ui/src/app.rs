@@ -23,6 +23,7 @@ use gpui_kit::component::*;
 use gpui_kit::*;
 
 use crate::state::AppState;
+use wavemark_core::silence::SilenceOptions;
 
 pub struct Editor {
     pub state: AppState,
@@ -131,6 +132,104 @@ impl Editor {
         .detach();
     }
 
+    /// Global keyboard shortcuts.
+    ///
+    /// Two rules keep this from fighting the text input:
+    ///
+    /// 1. Anything with a modifier is always ours (undo, redo).
+    /// 2. Bare letter keys are only ours when the annotation composer is not
+    ///    focused — otherwise typing "kind" would jump around and delete things.
+    fn on_key_down(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let m = e.keystroke.modifiers;
+        let key = e.keystroke.key.as_str();
+        let accel = m.platform || m.control;
+
+        if accel && key == "z" {
+            let what = if m.shift { "redo" } else { "undo" };
+            let ok = if m.shift {
+                self.state.redo()
+            } else {
+                self.state.undo()
+            };
+            self.state.status = if ok {
+                format!(
+                    "{what} — {}/{} undo left",
+                    self.state.can_undo(),
+                    self.state.can_redo()
+                )
+            } else {
+                format!("nothing to {what}")
+            };
+            cx.notify();
+            return;
+        }
+        if m.control || m.alt || m.platform || m.function {
+            return;
+        }
+
+        // Don't steal keys while the user is writing a note.
+        if let Some(input) = &self.input {
+            if input.read(cx).focus_handle(cx).is_focused(window) {
+                return;
+            }
+        }
+
+        match key {
+            "space" => {
+                if self.state.playing {
+                    self.state.pause();
+                } else {
+                    self.state.play();
+                    self.ensure_timer(cx);
+                }
+            }
+            "home" => self.state.seek(0.0),
+            "end" => self.state.seek(self.state.duration),
+            "left" => {
+                let step = if m.shift { 1.0 } else { 0.05 };
+                self.state.seek(self.state.playhead - step);
+            }
+            "right" => {
+                let step = if m.shift { 1.0 } else { 0.05 };
+                self.state.seek(self.state.playhead + step);
+            }
+            "+" | "=" => self.state.zoom_at(0.5, 1.5),
+            "-" => self.state.zoom_at(0.5, 1.0 / 1.5),
+            "j" => {
+                if !self.state.step_annotation(1) {
+                    self.state.status = "no annotations".into();
+                }
+            }
+            "k" => {
+                if !self.state.step_annotation(-1) {
+                    self.state.status = "no annotations".into();
+                }
+            }
+            "a" => {
+                self.add_annotation(window, cx);
+                return; // add_annotation already notifies
+            }
+            "e" => self.export(cx),
+            "delete" | "backspace" => match self.state.remove_annotation_at_selection() {
+                Ok(()) => self.state.status = "annotation deleted".into(),
+                Err(err) => self.state.status = format!("{err}"),
+            },
+            _ => return,
+        }
+        cx.notify();
+    }
+
+    /// A one-line reminder of the shortcuts. Cheaper than a help menu.
+    fn hint(&self) -> impl IntoElement {
+        div()
+            .h_flex()
+            .gap_2()
+            .p_2()
+            .w_full()
+            .text_xs()
+            .child("space play/pause · ←/→ seek (shift = 1s) · +/- zoom · j/k next/prev · a annotate · e export · del remove · ⌘Z undo")
+    }
+
     // ---- pieces -------------------------------------------------------------
 
     fn header(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -202,6 +301,26 @@ impl Editor {
                     })),
             )
             .child(
+                Button::new("undo")
+                    .label("Undo")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if !this.state.undo() {
+                            this.state.status = "nothing to undo".into();
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("redo")
+                    .label("Redo")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if !this.state.redo() {
+                            this.state.status = "nothing to redo".into();
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(
                 Button::new("zoomin")
                     .label("Zoom +")
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -215,6 +334,21 @@ impl Editor {
                     cx.notify();
                 },
             )))
+            .child(
+                Button::new("silence")
+                    .label("Mark silence")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let opts = SilenceOptions::default();
+                        match this.state.add_silence_marks(&opts) {
+                            Ok(0) => this.state.status = "no silence found".into(),
+                            Ok(n) => {
+                                this.state.status = format!("added {n} auto:silence annotation(s)")
+                            }
+                            Err(e) => this.state.status = format!("{e}"),
+                        }
+                        cx.notify();
+                    })),
+            )
             .child(
                 Button::new("fit")
                     .label("Fit")
@@ -496,9 +630,11 @@ impl Render for Editor {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .on_key_down(cx.listener(Self::on_key_down))
             .child(self.header(window, cx))
             .child(self.waveform(window, cx))
             .child(self.overview(window, cx))
             .child(self.panel(window, cx))
+            .child(self.hint())
     }
 }

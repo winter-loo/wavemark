@@ -129,6 +129,14 @@ wavemark annotations -f interview.wav | my-agent --audio interview.wav
 | `wavemark export (-f AUDIO) (--id ID \| --range START-END) [-o OUT] [--fade-ms N]` | write a range to 32-bit float WAV |
 | `wavemark info` | duration, sample rate, channels, annotation count |
 | `wavemark list` | one annotation per line |
+| `wavemark batch-export [-o DIR] [--fade-ms N] [--name-by-text]` | one WAV per annotation, plus a `manifest.json` |
+| `wavemark apply MANIFEST [--dry-run] [--prune]` | merge an agent's patch document back into the session |
+| `wavemark silence [--sound] [--threshold-dbfs N] [--min-len S] [--pad S] [--format table\|json] [--write]` | detect silent (or sounding) runs |
+| `wavemark normalize -o OUT [--target-dbfs N]` | peak-normalize (default -1 dBFS) |
+| `wavemark gain --db N -o OUT` | apply fixed gain; warns and exits 3 if it clips |
+| `wavemark cut --range START-END -o OUT` | remove a range and close the gap |
+| `wavemark split (-o DIR) [--parts N \| --at T1,T2]` | split into N parts, or at timestamps |
+| `wavemark concat A.wav B.wav -o OUT` | join files (sample rates must match) |
 
 Global flags: `--session PATH` (explicit `.wavemark.json`), `--audio/-f PATH`
 (the audio file, used to find the sidecar and to export).
@@ -147,6 +155,38 @@ wavemark export -f interview.wav --id a1f3            # the range of annotation 
 
 Exports are 32-bit float WAV with a short (default 5 ms) linear fade at each
 end, so cuts don't pop.
+
+### Closing the loop with `apply`
+
+`annotations` is the human → agent direction. `apply` is the way back, which is
+what makes this a loop rather than an export button:
+
+```sh
+wavemark annotations -f interview.wav --format json > notes.json
+#   ...your agent reads it, fixes text, adds findings of its own...
+wavemark apply -f interview.wav notes.json --dry-run   # see the diff first
+wavemark apply -f interview.wav notes.json             # commit it
+```
+
+Patches are matched by `id`: an id wavemark knows updates that annotation, an
+unknown or missing id creates a new one. Every field is optional, so an agent
+can move just the end time. Rows that fall outside the audio are rejected
+individually and reported — one bad row never costs the other nineteen — and
+the command exits `2` if anything was rejected.
+
+### Finding the marks for you
+
+```sh
+wavemark silence -f interview.wav                 # gaps, as a table
+wavemark silence -f interview.wav --sound         # utterances instead
+wavemark silence -f interview.wav --format json   # for an agent
+wavemark silence -f interview.wav --write         # save as auto:silence annotations
+```
+
+Detection walks the peak buckets we already computed for the waveform, not the
+raw PCM, so it's effectively free. Generated marks are tagged `auto:silence` /
+`auto:sound` so a person (or an agent) can tell a machine guess from a real
+note.
 
 ## The session file
 
@@ -196,6 +236,23 @@ rows of thin GPU-composited elements whose heights come from the peak data, so
 zooming and scrolling stay smooth on long files. Peaks are computed once
 (min/max/RMS per bucket) and down-sampled for whichever view is asking.
 
+## Keyboard shortcuts
+
+| key | action |
+|---|---|
+| `space` | play / pause |
+| `←` `→` | seek 50 ms (hold `shift` for 1 s) |
+| `home` / `end` | jump to start / end |
+| `+` / `-` | zoom around the centre |
+| `j` / `k` | next / previous annotation |
+| `a` | annotate the current selection |
+| `e` | export the current selection |
+| `delete` | delete the annotation under the selection |
+| `⌘Z` / `ctrl+Z` | undo (`shift` to redo) |
+
+Bare letter keys are ignored while the annotation composer has focus, so typing
+a note never triggers a shortcut.
+
 ## Building
 
 Everything except the GUI is pure Rust and builds anywhere:
@@ -243,14 +300,14 @@ Milestones:
 | milestone | what it covers | state |
 |---|---|---|
 | **v0.1 — Core loop** | two waveforms, sidecar session, CLI hand-off to an agent | complete |
-| **v0.2 — AI round-trip** | batch export, and merging an agent's findings back into the session | planned |
-| **v0.3 — Everyday editing** | silence detection, normalize/trim/split, keyboard shortcuts, audible playback | planned |
+| **v0.2 — AI round-trip** | batch export, and merging an agent's findings back into the session | complete |
+| **v0.3 — Everyday editing** | silence detection, normalize/gain/cut/split/concat, keyboard shortcuts + undo, audible playback | 4 of 5 done |
 
 Two things worth knowing before you pick something up:
 
 - **There is no audio output device yet.** The transport (`play`/`pause`/`stop`/
   `seek`) is fully implemented and the playhead renders correctly, but nothing
-  comes out of your speakers. Tracked as a ticket.
+  comes out of your speakers. This is the one open ticket in v0.3.
 - **The GUI is not built in CI.** gpui-kit needs display/system libraries that
   vary per runner. Only `wavemark-core` and `wavemark-cli` are checked on push.
 

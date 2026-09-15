@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use wavemark_core::audio::{decode, export_range, DecodedAudio};
+use wavemark_core::silence::{detect_silence, SilenceOptions};
 use wavemark_core::{Annotation, Peaks, Session, TimeRange};
 
 /// Peak resolution stored for the whole file. 100 buckets/sec is plenty of
@@ -18,6 +19,11 @@ const PEAKS_PER_SECOND: usize = 100;
 pub const MAIN_BARS: usize = 600;
 /// How many bars the bottom overview bar renders.
 pub const OVERVIEW_BARS: usize = 400;
+
+/// Depth of the undo stack. Sessions are small (a few KB of JSON), so 50
+/// snapshots is nothing — and generous undo is what makes a marking tool
+/// pleasant to use for an hour at a time.
+pub const MAX_UNDO: usize = 50;
 
 pub struct AppState {
     pub audio: Option<DecodedAudio>,
@@ -38,6 +44,11 @@ pub struct AppState {
     pub playhead: f64,
     pub playing: bool,
 
+    /// Snapshots of `session` before each mutation. Undo/redo only ever tracks
+    /// the *session* — never audio samples, which would be absurd.
+    undo_stack: Vec<Session>,
+    redo_stack: Vec<Session>,
+
     pub status: String,
 }
 
@@ -56,6 +67,8 @@ impl Default for AppState {
             drag_from: None,
             playhead: 0.0,
             playing: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             status: "open an audio file to begin".into(),
         }
     }
@@ -78,6 +91,8 @@ impl AppState {
         self.view_end = self.duration;
         self.playhead = 0.0;
         self.selection = None;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
 
         // Load the sidecar if it exists, otherwise start a fresh session. The
         // sidecar is how annotations reach the CLI.
@@ -245,6 +260,7 @@ impl AppState {
         let sel = self
             .selection
             .ok_or_else(|| anyhow!("select a range first"))?;
+        self.push_undo();
         let session = self
             .session
             .as_mut()
@@ -256,6 +272,7 @@ impl AppState {
     }
 
     pub fn remove_annotation(&mut self, id: &str) -> Result<()> {
+        self.push_undo();
         let session = self
             .session
             .as_mut()
@@ -263,6 +280,110 @@ impl AppState {
         session.remove_annotation(id);
         self.save_session()?;
         Ok(())
+    }
+
+    /// Remove whichever annotation covers the current selection. Used by the
+    /// Delete key, which has no idea what ids are.
+    pub fn remove_annotation_at_selection(&mut self) -> Result<()> {
+        let sel = self.selection.ok_or_else(|| anyhow!("no selection"))?;
+        let id = self
+            .session
+            .as_ref()
+            .and_then(|s| {
+                s.annotations
+                    .iter()
+                    .find(|a| a.range.overlaps(&sel))
+                    .map(|a| a.id.clone())
+            })
+            .ok_or_else(|| anyhow!("no annotation covers the selection"))?;
+        self.remove_annotation(&id)
+    }
+
+    /// Jump to the next (`delta > 0`) or previous (`delta < 0`) annotation,
+    /// wrapping around at the ends. Returns false when there's nothing to do.
+    pub fn step_annotation(&mut self, delta: isize) -> bool {
+        let Some(session) = self.session.as_ref() else {
+            return false;
+        };
+        if session.annotations.is_empty() || delta == 0 {
+            return false;
+        }
+        let n = session.annotations.len() as isize;
+        let cur = self.selection.map(|s| s.start).unwrap_or(self.playhead);
+
+        // `position` / `rposition` assume sorted order, which merge_patches
+        // and silence --write both maintain.
+        let idx = if delta > 0 {
+            session
+                .annotations
+                .iter()
+                .position(|a| a.range.start > cur + 1e-6)
+                .map(|i| i as isize)
+                .unwrap_or(0)
+        } else {
+            session
+                .annotations
+                .iter()
+                .rposition(|a| a.range.start < cur - 1e-6)
+                .map(|i| i as isize)
+                .unwrap_or(n - 1)
+        };
+        let idx = ((idx % n) + n) % n;
+
+        let a = session.annotations[idx as usize].clone();
+        self.select_annotation(&a);
+        self.playhead = a.range.start;
+        true
+    }
+
+    // ---- undo / redo --------------------------------------------------------
+
+    /// Snapshot the session before a mutation. Any new edit clears redo, which
+    /// is the behaviour everyone expects from every other editor.
+    fn push_undo(&mut self) {
+        if let Some(session) = &self.session {
+            self.undo_stack.push(session.clone());
+            if self.undo_stack.len() > MAX_UNDO {
+                self.undo_stack.remove(0);
+            }
+            self.redo_stack.clear();
+        }
+    }
+
+    #[must_use]
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    #[must_use]
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    /// Roll back one mutation. Restores the snapshot and persists, so the CLI
+    /// sees the undone state immediately.
+    pub fn undo(&mut self) -> bool {
+        let Some(prev) = self.undo_stack.pop() else {
+            return false;
+        };
+        if let Some(cur) = self.session.take() {
+            self.redo_stack.push(cur);
+        }
+        self.session = Some(prev);
+        let _ = self.save_session();
+        true
+    }
+
+    pub fn redo(&mut self) -> bool {
+        let Some(next) = self.redo_stack.pop() else {
+            return false;
+        };
+        if let Some(cur) = self.session.take() {
+            self.undo_stack.push(cur);
+        }
+        self.session = Some(next);
+        let _ = self.save_session();
+        true
     }
 
     // ---- session ------------------------------------------------------------
@@ -321,6 +442,36 @@ impl AppState {
         if self.playhead < self.view_start || self.playhead > self.view_end {
             self.focus(self.playhead);
         }
+    }
+
+    /// Run silence detection and add each run as an `auto:silence` annotation.
+    ///
+    /// Cheap enough to run interactively: it walks the ~100/second peak buckets
+    /// we already computed for the waveform, not the raw PCM.
+    pub fn add_silence_marks(&mut self, opts: &SilenceOptions) -> Result<usize> {
+        let peaks = self
+            .peaks
+            .clone()
+            .ok_or_else(|| anyhow!("no audio loaded"))?;
+        let spans = detect_silence(&peaks, opts);
+        if spans.is_empty() {
+            return Ok(0);
+        }
+        self.push_undo();
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| anyhow!("no session loaded"))?;
+        for s in &spans {
+            session.add_annotation(
+                Annotation::new(TimeRange::new(s.start, s.end), String::new())
+                    .with_tags(vec!["auto:silence".to_string()]),
+            );
+        }
+        session.sort_annotations();
+        let n = spans.len();
+        self.save_session()?;
+        Ok(n)
     }
 
     // ---- export -------------------------------------------------------------

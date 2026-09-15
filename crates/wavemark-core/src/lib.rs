@@ -10,13 +10,19 @@
 //! format and the audio engine have exactly one source of truth. That is what
 //! makes the "mark it in the GUI, read it from the terminal" loop reliable.
 
+pub mod dsp;
 pub mod model;
 pub mod peaks;
+pub mod silence;
 pub mod time;
 
 #[cfg(feature = "audio")]
 pub mod audio;
 
-pub use model::{Annotation, Session, TimeRange};
+pub use model::{
+    Annotation, AnnotationPatch, MergeReport, PatchDocument, Rejection, Session, TimeRange,
+    PATCH_SCHEMA,
+};
 pub use peaks::{Peak, Peaks};
+pub use silence::{detect_silence, detect_sound, SilenceOptions, Span};
 pub use time::{format_hms, format_ms};

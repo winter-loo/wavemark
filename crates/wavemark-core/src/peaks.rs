@@ -114,6 +114,17 @@ impl Peaks {
             (self.buckets.len() * self.samples_per_bucket) as f64 / self.sample_rate as f64
         }
     }
+
+    /// Seconds covered by a single bucket. Everything that converts bucket
+    /// indices to times should go through this rather than recomputing it.
+    #[must_use]
+    pub fn seconds_per_bucket(&self) -> f64 {
+        if self.sample_rate == 0 {
+            0.0
+        } else {
+            self.samples_per_bucket as f64 / self.sample_rate as f64
+        }
+    }
 }
 
 #[cfg(test)]

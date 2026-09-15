@@ -103,6 +103,41 @@ pub fn decode(path: &Path) -> Result<DecodedAudio> {
     })
 }
 
+/// Write a whole interleaved f32 buffer to a 32-bit float WAV file.
+///
+/// Used by the DSP commands (normalize, gain, cut, concat). Float rather than
+/// int on purpose: intermediate processing can legally exceed `[-1, 1]` and we
+/// would rather hand an agent the honest values than silently clip them.
+pub fn write_wav(samples: &[f32], sample_rate: u32, channels: u16, out: &Path) -> Result<()> {
+    let spec = hound::WavSpec {
+        channels,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let mut writer = hound::WavWriter::create(out, spec)
+        .with_context(|| format!("cannot create output {}", out.display()))?;
+    for &s in samples {
+        writer
+            .write_sample(s)
+            .map_err(|e| anyhow!("write failed: {e}"))?;
+    }
+    writer
+        .finalize()
+        .map_err(|e| anyhow!("finalize failed: {e}"))?;
+    Ok(())
+}
+
+/// Frame index for a time in seconds, clamped to `[0, total_frames]`.
+#[must_use]
+pub fn frame_at(t: f64, sample_rate: u32, total_frames: usize) -> usize {
+    if t <= 0.0 || sample_rate == 0 {
+        0
+    } else {
+        ((t * sample_rate as f64).round() as usize).min(total_frames)
+    }
+}
+
 /// Export the samples in `range` to a 32-bit float WAV file with short fades.
 ///
 /// `fade_ms` of linear gain ramp is applied at the head and tail so the cut

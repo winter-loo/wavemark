@@ -30,20 +30,20 @@ Issue numbers below assume creation order on a fresh repository (1..27).
 | 20 | [[ai-bridge] Stable `wavemark/annotations` JSON payload schema](#20-payload) | `ai-bridge` `cli` | #17 | done |
 | 21 | [[docs] README: the human <-> AI loop, CLI reference, architecture](#21-docs) | `docs` | #17 | done |
 
-## v0.2 — AI round-trip  —  0/2 closed
+## v0.2 — AI round-trip  —  2/2 closed
 
 | # | Ticket | Labels | Blocked by | Status |
 | -:| ------ | ------ | ---------- | ------ |
-| 22 | [[ai-bridge] `wavemark batch-export` — every annotation to its own WAV + one manifest](#22-batch-export) | `ai-bridge` `cli` `enhancement` | #20, #18 | open |
-| 23 | [[ai-bridge] `wavemark apply` — merge an agent-produced manifest back into the session](#23-apply) | `ai-bridge` `cli` `enhancement` | #20 | open |
+| 22 | [[ai-bridge] `wavemark batch-export` — every annotation to its own WAV + one manifest](#22-batch-export) | `ai-bridge` `cli` `enhancement` | #20, #18 | done |
+| 23 | [[ai-bridge] `wavemark apply` — merge an agent-produced manifest back into the session](#23-apply) | `ai-bridge` `cli` `enhancement` | #20 | done |
 
-## v0.3 — Everyday editing  —  0/4 closed
+## v0.3 — Everyday editing  —  3/4 closed
 
 | # | Ticket | Labels | Blocked by | Status |
 | -:| ------ | ------ | ---------- | ------ |
-| 24 | [[enhancement] Silence detection -> auto-generate candidate annotations](#24-silence) | `enhancement` `audio` `ai-bridge` | #6 | open |
-| 25 | [[enhancement] Everyday DSP: normalize / gain, trim, split, concatenate](#25-dsp) | `enhancement` `audio` `cli` | #7 | open |
-| 26 | [[enhancement] Keyboard shortcuts + undo/redo](#26-kbd-undo) | `enhancement` `gui` | #12, #14 | open |
+| 24 | [[enhancement] Silence detection -> auto-generate candidate annotations](#24-silence) | `enhancement` `audio` `ai-bridge` | #6 | done |
+| 25 | [[enhancement] Everyday DSP: normalize / gain, trim, split, concatenate](#25-dsp) | `enhancement` `audio` `cli` | #7 | done |
+| 26 | [[enhancement] Keyboard shortcuts + undo/redo](#26-kbd-undo) | `enhancement` `gui` | #12, #14 | done |
 | 27 | [[enhancement] Real audio output (rodio/cpal) — make playback audible](#27-audio-out) | `enhancement` `audio` `gui` | #15 | open |
 
 ---
@@ -531,7 +531,7 @@ No screenshots yet — `assets/` and `docs/` are empty. Needs a real GUI run, wh
 
 ### #22 — [ai-bridge] `wavemark batch-export` — every annotation to its own WAV + one manifest
 
-`batch-export` · milestone **v0.2 — AI round-trip** · **open**
+`batch-export` · milestone **v0.2 — AI round-trip** · **done**
 
 ## Why
 
@@ -539,21 +539,27 @@ The natural next step after single export. An agent working a 40-minute intervie
 
 ## Scope
 
-- [ ] `wavemark batch-export -f interview.wav -o out/`
-- [ ] One WAV per annotation, named by id (and optionally by slugified text)
-- [ ] A single `manifest.json` carrying the full annotation payload plus per-file paths
-- [ ] `--fade-ms` applied consistently
-- [ ] Non-zero exit with a clear message when there are no annotations
+- [x] `wavemark batch-export -f interview.wav -o out/`
+- [x] One WAV per annotation, named by id (and optionally by slugified text)
+- [x] A single `manifest.json` carrying the full annotation payload plus per-file paths
+- [x] `--fade-ms` applied consistently
+- [x] Non-zero exit with a clear message when there are no annotations
 
 ## Notes
 
 Should reuse the `wavemark/annotations` schema with a `files` array added rather than inventing a second format.
 
+## Implementation notes
+
+`--name-by-text` slugs the annotation into the filename and prefixes a 1-based index, so `--name-by-text` on two identical notes doesn't collide. Manifest reuses the `wavemark/annotations` record shape with a `file` field added rather than inventing a second format — one schema for a consumer to learn.
+
+Exits non-zero when the session has no annotations: a scripted caller that expected twelve clips and got an empty directory should fail loudly.
+
 *Blocked by #20, #18.*
 
 ### #23 — [ai-bridge] `wavemark apply` — merge an agent-produced manifest back into the session
 
-`apply` · milestone **v0.2 — AI round-trip** · **open**
+`apply` · milestone **v0.2 — AI round-trip** · **done**
 
 ## Why
 
@@ -568,22 +574,28 @@ wavemark apply -f x.wav notes.json
 
 ## Scope
 
-- [ ] Read a `wavemark/annotations` document
-- [ ] Upsert by `id`; create when absent, update when present
-- [ ] `--dry-run` printing a diff of what would change
-- [ ] `--prune` to drop annotations missing from the manifest
-- [ ] Atomic write, and refuse to write if `schema` is unrecognised
-- [ ] Validate every range against the audio duration
+- [x] Read a `wavemark/annotations` document
+- [x] Upsert by `id`; create when absent, update when present
+- [x] `--dry-run` printing a diff of what would change
+- [x] `--prune` to drop annotations missing from the manifest
+- [x] Atomic write, and refuse to write if `schema` is unrecognised
+- [x] Validate every range against the audio duration
 
 ## Design tension worth resolving
 
 Concurrent edits: the GUI writes on every keystroke-ish mutation, an agent writes in batch. Needs either file locking or a merge that reasons about `created_at`. Decide before implementing.
 
+## Implementation notes
+
+Resolved the concurrency tension noted above by *not* adding locking. Atomic writes (`save_atomic`: temp file + rename) mean a reader never sees a partial file, and merge is idempotent — replaying the same manifest twice reports `unchanged` on the second pass. That is enough for the human-types-in-GUI / agent-writes-in-batch pattern, and it keeps the format lock-free.
+
+Batches never abort on a bad row: `merge_patches` collects per-row rejections and continues, then exits `2` if anything was rejected. One malformed annotation shouldn't cost an agent its other nineteen edits.
+
 *Blocked by #20.*
 
 ### #24 — [enhancement] Silence detection -> auto-generate candidate annotations
 
-`silence` · milestone **v0.3 — Everyday editing** · **open**
+`silence` · milestone **v0.3 — Everyday editing** · **done**
 
 ## Why
 
@@ -593,21 +605,27 @@ RMS is already computed per bucket, so the detection itself is nearly free — t
 
 ## Scope
 
-- [ ] Threshold (dBFS) + minimum-length parameters
-- [ ] Sliding-window scan over the existing `Peaks` buffer
-- [ ] Emit candidate annotations tagged `auto:silence` for review
-- [ ] CLI flag to dump them as JSON without touching the session
-- [ ] Merge/debounce adjacent runs
+- [x] Threshold (dBFS) + minimum-length parameters
+- [x] Sliding-window scan over the existing `Peaks` buffer
+- [x] Emit candidate annotations tagged `auto:silence` for review
+- [x] CLI flag to dump them as JSON without touching the session
+- [x] Merge/debounce adjacent runs
 
 ## Design note
 
 Generated annotations must be distinguishable from human ones — hence the `auto:` tag prefix. An agent should be able to tell what a person actually said.
 
+## Implementation notes
+
+Runs on the `Peaks` buffer, not raw PCM — ~100 buckets/second means a 40-minute file is ~240k values instead of ~100M. Cheap enough to run on a button press in the GUI, which is exactly what `Mark silence` does.
+
+**Bug worth remembering:** the first version compared the linear RMS amplitude against a dBFS threshold, so nothing was ever detected. The conversion is explicit now (`to_dbfs`), and `is_silent` handles `-inf` (digital silence) as a special case because every comparison against it is false in the direction you want.
+
 *Blocked by #6.*
 
 ### #25 — [enhancement] Everyday DSP: normalize / gain, trim, split, concatenate
 
-`dsp` · milestone **v0.3 — Everyday editing** · **open**
+`dsp` · milestone **v0.3 — Everyday editing** · **done**
 
 ## Why
 
@@ -615,22 +633,33 @@ Exporting a marked range is the core loop, but it's the *only* edit right now. T
 
 ## Scope
 
-- [ ] `normalize` — peak-normalise to a target dBFS, optionally per-selection
-- [ ] `gain` — apply fixed dB, with clip detection
-- [ ] `trim` — keep a range, drop the rest (inverse of export)
-- [ ] `split` — cut at a timestamp or at every annotation boundary
-- [ ] `concat` — join files, with sample-rate agreement enforced
-- [ ] All destructive operations write a new file; the source is never modified
+- [x] `normalize` — peak-normalise to a target dBFS, optionally per-selection
+- [x] `gain` — apply fixed dB, with clip detection
+- [x] `trim` — keep a range, drop the rest (inverse of export)
+- [x] `split` — cut at a timestamp or at every annotation boundary
+- [x] `concat` — join files, with sample-rate agreement enforced
+- [x] All destructive operations write a new file; the source is never modified
 
 ## Notes
 
 Should be CLI-first (agent-friendly) with GUI buttons added afterwards. Every one of these is a pure function over `&[f32]` — keep them in `wavemark-core`, not the CLI.
 
+## Implementation notes
+
+All six operations are pure functions over `&[f32]` in `wavemark-core::dsp`, with the CLI a thin shell over them — so the GUI can reuse them later without going through a process.
+
+Two deliberate choices:
+
+- **Clipping is reported, never hidden.** `apply_gain` returns whether the result exceeds `[-1, 1]` and the CLI exits `3` with a warning on stderr. Silently clamping would hide a mistake from an agent that can't hear the result.
+- **Normalizing digital silence is a no-op**, not a multiplication by infinity.
+
+`split_into` puts the remainder in the final part rather than dropping samples — an earlier version silently discarded up to `n-1` samples.
+
 *Blocked by #7.*
 
 ### #26 — [enhancement] Keyboard shortcuts + undo/redo
 
-`kbd-undo` · milestone **v0.3 — Everyday editing** · **open**
+`kbd-undo` · milestone **v0.3 — Everyday editing** · **done**
 
 ## Why
 
@@ -638,16 +667,22 @@ Marking up forty regions with the mouse is tedious. Keyboard-first editing is wh
 
 ## Scope
 
-- [ ] `space` play/pause, `home`/`end` jump to start/end
-- [ ] `+`/`-` zoom, arrows nudge the playhead
-- [ ] `a` annotate current selection, `e` export it
-- [ ] `j`/`k` next/previous annotation
-- [ ] `delete` remove selected annotation
-- [ ] `cmd/ctrl+z` / `shift+cmd/ctrl+z` undo/redo over session mutations
+- [x] `space` play/pause, `home`/`end` jump to start/end
+- [x] `+`/`-` zoom, arrows nudge the playhead
+- [x] `a` annotate current selection, `e` export it
+- [x] `j`/`k` next/previous annotation
+- [x] `delete` remove selected annotation
+- [x] `cmd/ctrl+z` / `shift+cmd/ctrl+z` undo/redo over session mutations
 
 ## Design note
 
 Undo should snapshot the `Session` struct — it's small and `Clone`. Snapshotting audio samples would be absurd.
+
+## Implementation notes
+
+Undo snapshots the `Session` only, as planned — 50 deep, and every mutation writes through to the sidecar immediately so undo also persists (the CLI sees the undone state right away).
+
+The interesting problem was key conflicts with the annotation composer. Solution: modified chords (undo/redo) are always handled; bare letters are skipped whenever the input has focus, checked via `input.read(cx).focus_handle(cx).is_focused(window)`. Without this, typing "kept" would jump annotations and eat text.
 
 *Blocked by #12, #14.*
 
