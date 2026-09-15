@@ -1,0 +1,245 @@
+[
+  {
+    "key": "workspace",
+    "title": "[infra] Bootstrap the Cargo workspace (wavemark-core / wavemark-cli / wavemark-ui)",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["infra", "core"],
+    "blocked_by": [],
+    "done": true,
+    "body": "## Why\n\nThree crates with hard dependency direction `ui -> core <- cli`.\n\nThe separation matters for one specific reason: **`wavemark-core` must never depend on a GUI toolkit.** The CLI has to read exactly the same session file the GUI writes, from a headless box with no display. If core pulls in gpui, `wavemark annotations` stops working over SSH — and that command is the entire point of the project.\n\n## Scope\n\n- [x] Workspace root `Cargo.toml`, `resolver = \"2\"`, edition 2021, MSRV 1.80\n- [x] `wavemark-core` — model + peaks + time + audio (audio gated behind a feature flag so the pure model stays dependency-light)\n- [x] `wavemark-cli` — the agent-facing binary\n- [x] `wavemark-ui` — the gpui-kit binary\n- [x] `rustfmt.toml`, `.gitignore`, MIT `LICENSE`\n\n## Acceptance\n\n`cargo check --workspace` passes; `wavemark-core` compiles with no GUI dependency in its tree.\n\n## Implementation notes\n\n`wavemark-core` uses `default = []` with `audio = [\"dep:symphonia\", \"dep:hound\"]`. A consumer that only wants to parse `.wavemark.json` pays for `serde` and nothing else."
+  },
+  {
+    "key": "ci",
+    "title": "[infra] CI: build, test, clippy -D warnings, fmt --check",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["infra"],
+    "blocked_by": ["workspace"],
+    "done": true,
+    "body": "## Why\n\nThis repo is meant to be extended by agents. A green check on every push is the cheapest possible guardrail against an agent (or a human) quietly breaking the session format.\n\n## Scope\n\n- [x] `.github/workflows/ci.yml` on push + PR to `main`\n- [x] `cargo build` + `cargo test` for `wavemark-core` and `wavemark-cli`\n- [x] `cargo clippy --all-features -- -D warnings`\n- [x] `cargo fmt --check`\n- [x] dependency caching\n\n## Open\n\nThe `wavemark-ui` crate is not built in CI yet — gpui-kit needs system libraries (X11/wayland, vulkan/metal toolchain) that vary per runner. Needs a containerised or matrix build. Tracked separately."
+  },
+  {
+    "key": "model",
+    "title": "[core] TimeRange / Annotation / Session data model",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["core", "ai-bridge"],
+    "blocked_by": ["workspace"],
+    "done": true,
+    "body": "## Why\n\nAn annotation is worthless to an agent without an exact time range. So the range is not a property of the annotation — **the annotation *is* a range plus a note.** That is the whole model.\n\n## Scope\n\n- [x] `TimeRange { start, end }` with `new()` normalising reversed input, `duration()`, `contains()` (half-open), `overlaps()`, `clamp_to()`\n- [x] `Annotation { id, range, text, tags, color, created_at }` — `id` is a uuid v4 so an agent can reference one stably across round-trips\n- [x] `Session { version, audio_path, duration_sec, sample_rate, channels, annotations, last_selection }`\n- [x] `SESSION_VERSION = 1` for forward-compatible migrations\n- [x] Unit tests for normalisation, containment, overlap, clamping\n\n## Acceptance\n\n8/8 unit tests pass. `Annotation::new(range, text).with_tags([...])` reads well at the call site."
+  },
+  {
+    "key": "sidecar",
+    "title": "[core] Sidecar .wavemark.json — one shared source of truth for GUI and CLI",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["core", "ai-bridge"],
+    "blocked_by": ["model"],
+    "done": true,
+    "body": "## Why\n\nThis file is the product. The GUI writes it; the CLI reads it. No database, no daemon, no IPC — just a JSON file next to the audio.\n\n```\ninterview.wav\ninterview.wav.wavemark.json   <- both sides touch only this\n```\n\n## Scope\n\n- [x] `Session::sidecar_path()` — `song.wav` -> `song.wav.wavemark.json`\n- [x] `Session::resolve_sidecar()` — locate the sidecar for a given audio file\n- [x] `save()` / `load()` with pretty JSON and context-bearing errors\n- [x] `add_annotation` / `remove_annotation` / `annotation(id)`\n- [x] `last_selection` remembered so a re-open resumes where you left off\n\n## Design decision\n\nSidecar rather than embedded metadata: the source file is never modified. An agent can rewrite the sidecar as many times as it likes and the original audio stays byte-identical."
+  },
+  {
+    "key": "decode",
+    "title": "[audio] Decode mp3 / wav / flac / aac / ogg / m4a via symphonia",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["audio", "core"],
+    "blocked_by": ["workspace"],
+    "done": true,
+    "body": "## Why\n\nPure Rust, no C toolchain, no ffmpeg. `cargo build` and it decodes.\n\n## Scope\n\n- [x] `DecodedAudio { sample_rate, channels, duration_sec, samples }` (mono-mixed f32 interleaved)\n- [x] Format probing with extension hint, codec registry lookup, full packet drain\n- [x] `decode(path)` returning anyhow-contextualised errors\n\n## Implementation notes\n\nPinned to **`symphonia 0.5`**. The 0.6 line moved `SampleBuffer` out of `core::sample`, renamed `make_decoder` -> `make_audio_decoder`, and reordered `FormatOptions` arguments. 0.5 is the version whose API matches the current published docs. Worth revisiting when the ecosystem settles.\n\nNon-obvious bits that cost real time:\n- `prober.format(&hint, mss, ...)` — hint is the **first** argument\n- `SampleBuffer::new(frames as u64, *decoded.spec())` — takes duration *and* spec\n- `buf.copy_interleaved_ref(decoded)` returns `()`, not a `Result`"
+  },
+  {
+    "key": "peaks",
+    "title": "[audio] Peak extraction (min / max / RMS buckets) for a GPU-composited waveform",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["audio"],
+    "blocked_by": ["decode"],
+    "done": true,
+    "body": "## Why\n\nThe waveform is **not a bitmap**. Computing min/max/RMS per bucket lets the UI draw the wave as a row of GPU-composited rectangles. Redrawing 600 rects every frame is free; re-rasterising a bitmap is not. It also means zoom is a different down-sampling of the same data, not a re-render.\n\n## Scope\n\n- [x] `Peak { min, max, rms }`, `Peaks { buckets, samples_per_bucket, sample_rate, channels }`\n- [x] `from_interleaved()` — mono-mix frames, bucket them\n- [x] `bucket_at()`, `duration()`\n- [x] 100 buckets/second baseline; main canvas and overview bar down-sample from it\n\n## Acceptance\n\nPeak data computed once at load; both waveform views read from the same buffer at different resolutions."
+  },
+  {
+    "key": "export",
+    "title": "[audio] Export a selected range to 32-bit float WAV with fade in/out",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["audio", "cli"],
+    "blocked_by": ["decode"],
+    "done": true,
+    "body": "## Why\n\nAn agent asked to \"fix this clip\" needs an actual clip, not a timestamp in the abstract. And a hard-edged cut pops — a 5 ms linear fade is the difference between a usable stem and a click.\n\n## Scope\n\n- [x] `export_range(samples, sample_rate, channels, range, out, fade_ms)`\n- [x] 32-bit float WAV via `hound` (no clipping on intermediate processing)\n- [x] Linear fade-in / fade-out, clamped so short ranges can't overlap\n- [x] Range clamped to file bounds\n\n## Acceptance\n\n`export --range 0.5-1.5` on a 2 s file produces a 1.000 s WAV."
+  },
+  {
+    "key": "time",
+    "title": "[core] Timestamp formatting and parsing (M:SS.mmm / H:MM:SS.mmm) + unit tests",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["core"],
+    "blocked_by": ["workspace"],
+    "done": true,
+    "body": "## Why\n\nAgents are markedly better at `\"start\": \"0:01.234\"` than at `\"start\": 1.234`. Human-readable timestamps in the payload remove a whole class of off-by-one-unit errors, and the parser accepts both forms on the way back in.\n\n## Scope\n\n- [x] `format_ms()` -> `M:SS.mmm`, upgrading to `H:MM:SS.mmm` past an hour\n- [x] `parse_ts()` accepting `M:SS.mmm` or bare seconds\n- [x] Round-trip and boundary tests\n\n## Bug found and fixed\n\n`format_ms` did `seconds.round() as u64` and then treated the value as milliseconds — every timestamp was 1000x too small. Now `(seconds * 1000.0).round() as u64`. Caught by the unit tests, not by inspection."
+  },
+  {
+    "key": "main-waveform",
+    "title": "[gui] Main waveform canvas — large centre display, GPU-composited",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["gui"],
+    "blocked_by": ["peaks"],
+    "done": true,
+    "body": "## Why\n\nThe brief asked for a *大方* (generous) waveform in the centre. This is where precision happens: after the overview bar gets you to the right neighbourhood, this is where you land on the exact millisecond.\n\n## Scope\n\n- [x] Full-width bar row, symmetric about the centre line\n- [x] Selection overlay drawn on top\n- [x] Annotation markers\n- [x] Playhead line\n- [x] Theme-aware colours via `cx.theme()`\n\n## Implementation notes\n\n600 bars (`MAIN_BARS`), reduced from an initial 1200 — 1200 divs per frame was measurably less smooth while the playhead animated. Bar count is a constant in `state.rs` if you want to trade fidelity for frame time."
+  },
+  {
+    "key": "overview",
+    "title": "[gui] Bottom overview waveform bar — find where the sound is",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["gui"],
+    "blocked_by": ["peaks"],
+    "done": true,
+    "body": "## Why\n\nThe second waveform is the unusual bit of this design and the one worth defending.\n\nA single zoomed waveform gives you precision *or* context, never both. Two waveforms split the job:\n\n| View | Question it answers |\n| --- | --- |\n| bottom overview bar | *where in the file is there sound at all?* |\n| big centre canvas | *exactly which milliseconds?* |\n\nOn a 40-minute interview, the overview bar is the only thing standing between you and scrolling.\n\n## Scope\n\n- [x] Always renders the entire file (never zooms)\n- [x] 400 bars down-sampled from the same peak buffer\n- [x] Current viewport window highlighted\n- [x] Click / drag to jump and scrub"
+  },
+  {
+    "key": "link-views",
+    "title": "[gui] Link the two waveforms: overview -> main canvas navigation",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["gui"],
+    "blocked_by": ["main-waveform", "overview"],
+    "done": true,
+    "body": "## Why\n\nTwo waveforms that don't talk to each other are just two waveforms. The whole design hinges on coarse-to-fine:\n\n```\noverview:  \"there's something around 12:30\"\n   |\n   +-- click/drag\n   v\nmain view: \"it's 12:31.480 to 12:33.910\"\n```\n\n## Scope\n\n- [x] `focus(t)` centres the main view on a time\n- [x] `time_at_frac()` / `frac_at_time()` map pixels <-> seconds\n- [x] Viewport window indicator on the overview bar\n- [x] Clicking an annotation in the list selects it and reveals it\n\n## Acceptance\n\nClicking the overview bar recentres the main canvas on that time, keeping the current zoom level."
+  },
+  {
+    "key": "select",
+    "title": "[gui] Drag-to-select a range + selection overlay",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["gui"],
+    "blocked_by": ["main-waveform"],
+    "done": true,
+    "body": "## Why\n\nSelection is the atom everything else is built on — export, annotate, and loop all consume it.\n\n## Scope\n\n- [x] `begin_drag` / `update_drag` / `end_drag` with a drag anchor\n- [x] Reversed drags (right-to-left) normalise correctly\n- [x] Sub-20 ms drags treated as \"clear selection\" rather than a degenerate range\n- [x] Selection rendered as a translucent overlay on the main canvas\n- [x] Selection persisted to `last_selection` in the sidecar\n\n## Acceptance\n\nDragging backwards produces the same `TimeRange` as dragging forwards over the same span."
+  },
+  {
+    "key": "zoom",
+    "title": "[gui] Wheel zoom around the cursor anchor, clamped to file bounds",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["gui"],
+    "blocked_by": ["main-waveform"],
+    "done": true,
+    "body": "## Why\n\nZooming around the cursor — not around the centre — is what makes a waveform feel physical. The sample under your pointer stays under your pointer.\n\n## Scope\n\n- [x] `zoom_at(anchor_frac, factor)` keeps the anchor time stationary\n- [x] Clamped to a 20 ms minimum span (no zooming past sample-level usefulness)\n- [x] Clamped to file bounds at both ends\n- [x] Edge correction so the view never scrolls past 0 or `duration`\n\n## Acceptance\n\nZooming at the far right edge does not drift the viewport off the end of the file."
+  },
+  {
+    "key": "annotate-ui",
+    "title": "[gui] Annotation markers on the waveform + annotation list panel",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["gui", "ai-bridge"],
+    "blocked_by": ["sidecar", "select"],
+    "done": true,
+    "body": "## Why\n\nWhere the note becomes data. Select a range, type what's wrong, hit save — and the sidecar updates, which means the CLI sees it immediately.\n\n## Scope\n\n- [x] Text input for note body, tag input (comma separated)\n- [x] Markers drawn at annotation ranges on the main canvas\n- [x] List panel with timestamps; click to select and reveal\n- [x] Delete\n- [x] Auto-save to sidecar on every mutation\n\n## Design decision\n\nEvery mutation writes through to disk immediately. No \"unsaved changes\" state, no save button to forget. It also means an agent tailing the file sees annotations as you make them."
+  },
+  {
+    "key": "transport",
+    "title": "[gui] Transport: play / pause / stop / seek + playhead rendering",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["gui"],
+    "blocked_by": ["main-waveform"],
+    "done": true,
+    "body": "## Why\n\nYou often need to hear a boundary before you commit to it.\n\n## Scope\n\n- [x] `play()` / `pause()` / `stop()` / `seek(t)`\n- [x] `tick(dt)` advancing the playhead, looping within the selection when one exists\n- [x] `follow_playhead()` auto-scrolls the view to keep the playhead visible\n- [x] Playhead line rendered on the main canvas and the overview bar\n\n## Known limitation — read before closing\n\n**There is no audio output device yet.** The transport advances playhead state and UI correctly but produces no sound. Real playback needs `rodio`/`cpal` wired to the decoded buffer. Tracked as a follow-up ticket."
+  },
+  {
+    "key": "cli-info",
+    "title": "[cli] `wavemark info` — duration, sample rate, channels",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["cli", "ai-bridge"],
+    "blocked_by": ["sidecar"],
+    "done": true,
+    "body": "## Why\n\nThe first thing an agent needs to know before it proposes an edit is how long the file is. Cheap, fast, no decoding of the full stream required beyond what's needed.\n\n## Scope\n\n- [x] Human-readable by default (`2.000 s (0:02.000), 44100 Hz, 1 ch, 2 annotations`)\n- [x] Annotation count surfaced alongside audio metadata\n\n## Acceptance\n\n`wavemark info -f clip.wav` prints duration in both raw seconds and `M:SS.mmm`."
+  },
+  {
+    "key": "cli-annotations",
+    "title": "[cli] `wavemark annotations --format json|markdown` — the AI-agent bridge",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["cli", "ai-bridge"],
+    "blocked_by": ["sidecar"],
+    "done": true,
+    "body": "## Why\n\n**This is the reason the project exists.**\n\nEvery annotation added in the GUI, with its exact time range, available in a terminal as machine-readable JSON. `wavemark annotations -f x.wav --format json | your-agent` is the entire human -> agent hand-off.\n\n## Scope\n\n- [x] `--format json` — stable payload, see the schema ticket\n- [x] `--format markdown` — for pasting into a prompt or a PR\n- [x] Both raw `start_sec` floats and formatted `start` / `end` strings in every record\n\n## Acceptance\n\nSelection `0.5 -> 1.0` round-trips as `start_sec: 0.5, start: \"0:00.500\", end: \"0:01.000\"`."
+  },
+  {
+    "key": "cli-export",
+    "title": "[cli] `wavemark export --id ID | --range START-END [-o OUT] [--fade-ms N]`",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["cli"],
+    "blocked_by": ["export"],
+    "done": true,
+    "body": "## Why\n\nAn agent can only act on audio it can read. Two entry points cover both workflows: `--id` for \"that thing I marked\", `--range` for \"this window, computed elsewhere\".\n\n## Scope\n\n- [x] `--id` resolves an annotation by uuid and exports its range\n- [x] `--range 0.5-1.5` with `parse_ts()`-compatible bounds\n- [x] `-o` output path\n- [x] `--fade-ms` fade length\n\n## Acceptance\n\n`export --id a2` on a 0.600 s annotation produces a 0.600 s WAV."
+  },
+  {
+    "key": "cli-resolve",
+    "title": "[cli] Sidecar auto-resolution: --session, next to audio, or single file in cwd",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["cli", "ai-bridge"],
+    "blocked_by": ["sidecar"],
+    "done": true,
+    "body": "## Why\n\nFriction here kills the workflow. An agent running `wavemark annotations` in a directory should not have to be told which session file to read.\n\n## Scope\n\nResolution order:\n\n1. explicit `--session <path>`\n2. sidecar adjacent to `--audio` (`song.wav` -> `song.wav.wavemark.json`)\n3. if exactly one `*.wavemark.json` exists in the cwd, use it\n4. otherwise error with an actionable message\n\n## Design note\n\nStep 3 is deliberately strict: **exactly one**, not \"the first one found\". Silently picking a session in a directory with several would be a bad failure mode for an automated caller."
+  },
+  {
+    "key": "payload",
+    "title": "[ai-bridge] Stable `wavemark/annotations` JSON payload schema",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["ai-bridge", "cli"],
+    "blocked_by": ["cli-annotations"],
+    "done": true,
+    "body": "## Why\n\nAn agent is a consumer with no tolerance for surprises. Versioned, documented, redundant-by-design output.\n\n## Scope\n\n- [x] `schema` discriminator field (`\"wavemark/annotations\"`) so a consumer can validate what it got\n- [x] audio context block (path, duration, sample rate, channels)\n- [x] annotations array with `id`, `start_sec`, `end_sec`, `duration_sec`, `start`, `end`, `text`, `tags`\n\n## Design decision\n\nBoth `start_sec` (float) and `start` (`\"0:00.500\"`) are present on every record. Redundant on purpose: the float is for computation, the string is for the model's comprehension and for echoing back in a prompt. Costs a few bytes, prevents a category of error."
+  },
+  {
+    "key": "docs",
+    "title": "[docs] README: the human <-> AI loop, CLI reference, architecture",
+    "milestone": "v0.1 — Core loop",
+    "labels": ["docs"],
+    "blocked_by": ["cli-annotations"],
+    "done": true,
+    "body": "## Why\n\nThe concept only lands if the first screen explains the loop. Someone should understand *why there is a CLI at all* within ten seconds.\n\n## Scope\n\n- [x] The loop diagram (GUI -> sidecar -> CLI -> agent)\n- [x] \"Why two waveforms?\" — the design justification, not just a feature list\n- [x] Quick start and build instructions\n- [x] Annotated JSON payload example\n- [x] Full CLI reference table\n- [x] Sidecar format documentation\n- [x] Crate architecture\n- [x] Roadmap\n\n## Open\n\nNo screenshots yet — `assets/` and `docs/` are empty. Needs a real GUI run, which needs a display."
+  },
+  {
+    "key": "batch-export",
+    "title": "[ai-bridge] `wavemark batch-export` — every annotation to its own WAV + one manifest",
+    "milestone": "v0.2 — AI round-trip",
+    "labels": ["ai-bridge", "cli", "enhancement"],
+    "blocked_by": ["payload", "cli-export"],
+    "done": false,
+    "body": "## Why\n\nThe natural next step after single export. An agent working a 40-minute interview wants all twelve marked regions at once, each as its own file, plus one manifest tying them together — not twelve sequential invocations.\n\n## Scope\n\n- [ ] `wavemark batch-export -f interview.wav -o out/`\n- [ ] One WAV per annotation, named by id (and optionally by slugified text)\n- [ ] A single `manifest.json` carrying the full annotation payload plus per-file paths\n- [ ] `--fade-ms` applied consistently\n- [ ] Non-zero exit with a clear message when there are no annotations\n\n## Notes\n\nShould reuse the `wavemark/annotations` schema with a `files` array added rather than inventing a second format."
+  },
+  {
+    "key": "apply",
+    "title": "[ai-bridge] `wavemark apply` — merge an agent-produced manifest back into the session",
+    "milestone": "v0.2 — AI round-trip",
+    "labels": ["ai-bridge", "cli", "enhancement"],
+    "blocked_by": ["payload"],
+    "done": false,
+    "body": "## Why\n\nRight now the loop is one-way: human annotates, agent reads. Closing it is what makes this genuinely collaborative rather than a fancy export button.\n\n```\nwavemark annotations -f x.wav --format json > notes.json\n# ...agent reads, edits, adds its own findings...\nwavemark apply -f x.wav notes.json\n# annotations now visible in the GUI\n```\n\n## Scope\n\n- [ ] Read a `wavemark/annotations` document\n- [ ] Upsert by `id`; create when absent, update when present\n- [ ] `--dry-run` printing a diff of what would change\n- [ ] `--prune` to drop annotations missing from the manifest\n- [ ] Atomic write, and refuse to write if `schema` is unrecognised\n- [ ] Validate every range against the audio duration\n\n## Design tension worth resolving\n\nConcurrent edits: the GUI writes on every keystroke-ish mutation, an agent writes in batch. Needs either file locking or a merge that reasons about `created_at`. Decide before implementing."
+  },
+  {
+    "key": "silence",
+    "title": "[enhancement] Silence detection -> auto-generate candidate annotations",
+    "milestone": "v0.3 — Everyday editing",
+    "labels": ["enhancement", "audio", "ai-bridge"],
+    "blocked_by": ["peaks"],
+    "done": false,
+    "body": "## Why\n\nThe overview bar already shows you *where* the sound is. The obvious next move is to stop making you look.\n\nRMS is already computed per bucket, so the detection itself is nearly free — the work is in the UX.\n\n## Scope\n\n- [ ] Threshold (dBFS) + minimum-length parameters\n- [ ] Sliding-window scan over the existing `Peaks` buffer\n- [ ] Emit candidate annotations tagged `auto:silence` for review\n- [ ] CLI flag to dump them as JSON without touching the session\n- [ ] Merge/debounce adjacent runs\n\n## Design note\n\nGenerated annotations must be distinguishable from human ones — hence the `auto:` tag prefix. An agent should be able to tell what a person actually said."
+  },
+  {
+    "key": "dsp",
+    "title": "[enhancement] Everyday DSP: normalize / gain, trim, split, concatenate",
+    "milestone": "v0.3 — Everyday editing",
+    "labels": ["enhancement", "audio", "cli"],
+    "blocked_by": ["export"],
+    "done": false,
+    "body": "## Why\n\nExporting a marked range is the core loop, but it's the *only* edit right now. These are the operations people reach for next, and they're all cheap on a decoded f32 buffer.\n\n## Scope\n\n- [ ] `normalize` — peak-normalise to a target dBFS, optionally per-selection\n- [ ] `gain` — apply fixed dB, with clip detection\n- [ ] `trim` — keep a range, drop the rest (inverse of export)\n- [ ] `split` — cut at a timestamp or at every annotation boundary\n- [ ] `concat` — join files, with sample-rate agreement enforced\n- [ ] All destructive operations write a new file; the source is never modified\n\n## Notes\n\nShould be CLI-first (agent-friendly) with GUI buttons added afterwards. Every one of these is a pure function over `&[f32]` — keep them in `wavemark-core`, not the CLI."
+  },
+  {
+    "key": "kbd-undo",
+    "title": "[enhancement] Keyboard shortcuts + undo/redo",
+    "milestone": "v0.3 — Everyday editing",
+    "labels": ["enhancement", "gui"],
+    "blocked_by": ["select", "annotate-ui"],
+    "done": false,
+    "body": "## Why\n\nMarking up forty regions with the mouse is tedious. Keyboard-first editing is what makes the tool viable for real sessions.\n\n## Scope\n\n- [ ] `space` play/pause, `home`/`end` jump to start/end\n- [ ] `+`/`-` zoom, arrows nudge the playhead\n- [ ] `a` annotate current selection, `e` export it\n- [ ] `j`/`k` next/previous annotation\n- [ ] `delete` remove selected annotation\n- [ ] `cmd/ctrl+z` / `shift+cmd/ctrl+z` undo/redo over session mutations\n\n## Design note\n\nUndo should snapshot the `Session` struct — it's small and `Clone`. Snapshotting audio samples would be absurd."
+  },
+  {
+    "key": "audio-out",
+    "title": "[enhancement] Real audio output (rodio/cpal) — make playback audible",
+    "milestone": "v0.3 — Everyday editing",
+    "labels": ["enhancement", "audio", "gui"],
+    "blocked_by": ["transport"],
+    "done": false,
+    "body": "## Why\n\nStraightforward gap, documented rather than hidden: **the transport currently advances a playhead and draws it, but no sound comes out.**\n\nThe state machine (`play`/`pause`/`stop`/`seek`/`tick`) and all rendering are correct and complete. What's missing is a device.\n\n## Scope\n\n- [ ] Pick `rodio` (simpler) or `cpal` (more control)\n- [ ] Stream the decoded buffer from an arbitrary offset\n- [ ] Handle sample-rate conversion when the device rate differs from the file rate\n- [ ] Respect the selection loop already implemented in `tick()`\n- [ ] Gate behind a feature flag so a headless build stays dependency-light\n\n## Acceptance\n\nPressing play produces audio, and the playhead stays in sync with what you hear."
+  }
+]

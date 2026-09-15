@@ -222,16 +222,37 @@ cargo build -p wavemark-ui
 On macOS it should just work (Metal). Windows is untested but gpui-kit supports
 it.
 
-## Roadmap
+## Tickets
 
-Open tickets on the issue tracker cover the rest, including:
+Work is tracked as GitHub issues, generated from a manifest in the repo so the
+tracker and the source never drift apart:
 
-- real audio playback through your speakers (the transport currently animates
-  the playhead only)
-- waveform channels rendered side by side for stereo files
-- undo / redo
-- batch export of every annotation at once
-- drag-to-move annotation edges
+| file | what it is |
+|---|---|
+| [`scripts/tickets.json`](./scripts/tickets.json) | source of truth — every ticket, its labels, milestone, and dependencies |
+| [`scripts/render-tickets.py`](./scripts/render-tickets.py) | regenerates the browsable doc + dependency graph |
+| [`docs/TICKETS.md`](./docs/TICKETS.md) | generated index, grouped by milestone |
+
+```sh
+# edit scripts/tickets.json, then:
+python3 scripts/render-tickets.py
+```
+
+Milestones:
+
+| milestone | what it covers | state |
+|---|---|---|
+| **v0.1 — Core loop** | two waveforms, sidecar session, CLI hand-off to an agent | complete |
+| **v0.2 — AI round-trip** | batch export, and merging an agent's findings back into the session | planned |
+| **v0.3 — Everyday editing** | silence detection, normalize/trim/split, keyboard shortcuts, audible playback | planned |
+
+Two things worth knowing before you pick something up:
+
+- **There is no audio output device yet.** The transport (`play`/`pause`/`stop`/
+  `seek`) is fully implemented and the playhead renders correctly, but nothing
+  comes out of your speakers. Tracked as a ticket.
+- **The GUI is not built in CI.** gpui-kit needs display/system libraries that
+  vary per runner. Only `wavemark-core` and `wavemark-cli` are checked on push.
 
 ## License
 
