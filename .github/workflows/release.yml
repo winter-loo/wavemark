@@ -217,7 +217,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          tar -xzf *.tar.gz
+          tar -xzf ./*.tar.gz
           bindir="$(ls -d "$PWD"/wavemark-*"${{ matrix.target }}")"
           echo "WM=$bindir/wavemark" >> "$GITHUB_ENV"
           chmod +x "$bindir/wavemark"
@@ -227,7 +227,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          7z x *.zip
+          7z x ./*.zip
           bindir="$(ls -d "$PWD"/wavemark-*"${{ matrix.target }}")"
           echo "WM=$bindir/wavemark.exe" >> "$GITHUB_ENV"
 
@@ -269,7 +269,7 @@ jobs:
       - name: Collect checksums
         run: |
           cd dist
-          cat *.sha256 | sort -k2 > SHA256SUMS
+          cat ./*.sha256 | sort -k2 > SHA256SUMS
           cat SHA256SUMS
 
       - name: Is this a pre-release?
