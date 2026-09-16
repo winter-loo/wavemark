@@ -393,11 +393,15 @@ impl Editor {
             )
             .child(divider(line))
             // transport
+            // Rewind jumps to the top of the file and keeps the transport
+            // state; Stop halts and rewinds to the start of the *window*. Same
+            // destination only when there is no selection, which is exactly why
+            // both exist.
             .child(
-                tool("rewind", IconName::Rewind, "Back to start (Home)")
+                tool("rewind", IconName::Rewind, "Jump to start (Home)")
                     .disabled(!has_audio)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.state.stop();
+                        this.state.seek(0.0);
                         cx.notify();
                     })),
             )
