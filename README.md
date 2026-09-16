@@ -68,6 +68,11 @@ Each archive contains both `wavemark` (CLI) and `wavemark-ui` (GUI), plus a
 `.sha256` checksum. On macOS you may need to right-click → Open the first time,
 since the binaries aren't notarised yet.
 
+The macOS Intel build is cross-compiled from an Apple Silicon runner, because
+GitHub retired its x86_64 macOS runners. It ships on a best-effort basis — if it
+is ever missing from a release, that one build failed and everyone else is
+unaffected.
+
 ## Quick start
 
 ```sh

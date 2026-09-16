@@ -27,6 +27,13 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# The Windows runner's default shell is PowerShell, which does not understand
+# `\` line continuations and treats `-p` as an unknown cmdlet. Forcing bash
+# everywhere keeps every step below portable across the whole matrix.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build:
     name: ${{ matrix.target }}
@@ -42,9 +49,6 @@ jobs:
             archive: tar.gz
           - os: macos-14
             target: aarch64-apple-darwin
-            archive: tar.gz
-          - os: macos-13
-            target: x86_64-apple-darwin
             archive: tar.gz
           - os: windows-2022
             target: x86_64-pc-windows-msvc
@@ -85,7 +89,6 @@ jobs:
 
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
-        shell: bash
         run: |
           set -euo pipefail
           tag="${{ github.event.inputs.tag || github.ref_name }}"
@@ -100,7 +103,6 @@ jobs:
 
       - name: Package (windows)
         if: matrix.archive == 'zip'
-        shell: bash
         run: |
           set -euo pipefail
           tag="${{ github.event.inputs.tag || github.ref_name }}"
@@ -121,6 +123,55 @@ jobs:
             *.tar.gz.sha256
             *.zip
             *.zip.sha256
+          if-no-files-found: error
+
+  # GitHub retired the x86_64 macOS runners (`macos-13` and older), so Intel
+  # Mac binaries are cross-compiled from an Apple Silicon runner instead. The
+  # macOS SDK shipped with Xcode is universal, so linking for `-arch x86_64`
+  # works without a second machine.
+  #
+  # Best effort: Intel Macs are a shrinking slice of users and this is the one
+  # target we cannot verify end-to-end, so a failure here must not block the
+  # release for everyone else.
+  build-macos-intel:
+    name: x86_64-apple-darwin (cross)
+    runs-on: macos-14
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-apple-darwin-cross
+
+      - name: Build
+        run: |
+          cargo build --release --locked --target x86_64-apple-darwin \
+            -p wavemark-cli -p wavemark-ui
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          name="wavemark-$tag-x86_64-apple-darwin"
+          mkdir -p "staging/$name"
+          for b in wavemark wavemark-ui; do
+            cp "target/x86_64-apple-darwin/release/$b" "staging/$name/"
+          done
+          cp README.md LICENSE "staging/$name/"
+          tar -czf "$name.tar.gz" -C staging "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-x86_64-apple-darwin
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
           if-no-files-found: error
 
   # Smoke-test the binaries on the machine that built them before publishing.
@@ -145,49 +196,68 @@ jobs:
           name: dist-${{ matrix.target }}
           path: dist
 
+      # Ubuntu ships `python3` while the Windows image only exposes `python`;
+      # resolve it once rather than guessing per step.
+      - name: Resolve python
+        run: |
+          if command -v python3 >/dev/null 2>&1; then
+            echo "PYTHON_BIN=python3" >> "$GITHUB_ENV"
+          elif command -v python >/dev/null 2>&1; then
+            echo "PYTHON_BIN=python" >> "$GITHUB_ENV"
+          else
+            echo "::error::no python interpreter found"
+            exit 1
+          fi
+
+      # Export the absolute path of the binary instead of putting its directory
+      # on PATH: a glob inside double quotes is not expanded, and Git Bash's
+      # POSIX-style `$PWD` is not a valid Windows PATH entry.
       - name: Unpack (unix)
         if: runner.os != 'Windows'
-        shell: bash
         run: |
-          cd dist && tar -xzf *.tar.gz
-          echo "$(pwd)/wavemark-*-$(echo ${{ matrix.target }})" >> "$GITHUB_PATH"
+          set -euo pipefail
+          cd dist
+          tar -xzf *.tar.gz
+          bindir="$(ls -d "$PWD"/wavemark-*"${{ matrix.target }}")"
+          echo "WM=$bindir/wavemark" >> "$GITHUB_ENV"
+          chmod +x "$bindir/wavemark"
 
       - name: Unpack (windows)
         if: runner.os == 'Windows'
-        shell: bash
         run: |
-          cd dist && 7z x *.zip
-          echo "$(pwd)/wavemark-*-${{ matrix.target }}" >> "$GITHUB_PATH"
+          set -euo pipefail
+          cd dist
+          7z x *.zip
+          bindir="$(ls -d "$PWD"/wavemark-*"${{ matrix.target }}")"
+          echo "WM=$bindir/wavemark.exe" >> "$GITHUB_ENV"
 
       - name: wavemark --version
-        shell: bash
-        run: wavemark --version
+        run: "$WM" --version
 
       - name: Round-trip a generated file
-        shell: bash
         run: |
           set -euo pipefail
           # A 1s tone, 1s silence, 1s tone — enough to exercise decode,
           # silence detection, annotation writing and export.
-          python3 - <<'PY'
+          "$PYTHON_BIN" - <<'PYEOF'
           import math, struct, wave
           sr = 44100
           tone = lambda f: [0.6*math.sin(2*math.pi*f*i/sr) for i in range(sr)]
           s = tone(440) + [0.0]*sr + tone(660)
           w = wave.open('clip.wav','w'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
           w.writeframes(b''.join(struct.pack('<h', int(max(-1,min(1,x))*32767)) for x in s)); w.close()
-          PY
-          wavemark -f clip.wav info
-          wavemark -f clip.wav silence --sound --write
-          wavemark -f clip.wav annotations --format json > notes.json
-          test "$(python3 -c 'import json;print(len(json.load(open("notes.json"))["annotations"]))')" = "2"
-          wavemark -f clip.wav batch-export -o out >/dev/null
+          PYEOF
+          "$WM" -f clip.wav info
+          "$WM" -f clip.wav silence --sound --write
+          "$WM" -f clip.wav annotations --format json > notes.json
+          test "$("$PYTHON_BIN" -c 'import json;print(len(json.load(open("notes.json"))["annotations"]))')" = "2"
+          "$WM" -f clip.wav batch-export -o out >/dev/null
           test -f out/manifest.json
           echo "smoke test passed"
 
   release:
     name: publish
-    needs: [build, smoke]
+    needs: [build, build-macos-intel, smoke]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
