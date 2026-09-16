@@ -59,10 +59,14 @@ Rust toolchain needed:
 
 | platform | file |
 |---|---|
-| Linux x86_64 | `wavemark-v0.1.0-rc.1-x86_64-unknown-linux-gnu.tar.gz` |
-| macOS Apple silicon | `wavemark-v0.1.0-rc.1-aarch64-apple-darwin.tar.gz` |
-| macOS Intel | `wavemark-v0.1.0-rc.1-x86_64-apple-darwin.tar.gz` |
-| Windows x86_64 | `wavemark-v0.1.0-rc.1-x86_64-pc-windows-msvc.zip` |
+| Linux x86_64 | `wavemark-v<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS Apple silicon | `wavemark-v<version>-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `wavemark-v<version>-x86_64-apple-darwin.tar.gz` |
+| Windows x86_64 | `wavemark-v<version>-x86_64-pc-windows-msvc.zip` |
+
+`<version>` is the tag, e.g. `0.1.0-rc.2`. Check the
+[releases page](https://github.com/winter-loo/wavemark/releases) for whatever is
+current — pinning the name in this table just guarantees it goes stale.
 
 Each archive contains both `wavemark` (CLI) and `wavemark-ui` (GUI), plus a
 `.sha256` checksum. On macOS you may need to right-click → Open the first time,

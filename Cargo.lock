@@ -7730,7 +7730,7 @@ dependencies = [
 
 [[package]]
 name = "wavemark-cli"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -7741,7 +7741,7 @@ dependencies = [
 
 [[package]]
 name = "wavemark-core"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7756,7 +7756,7 @@ dependencies = [
 
 [[package]]
 name = "wavemark-ui"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "anyhow",
  "gpui-kit",
