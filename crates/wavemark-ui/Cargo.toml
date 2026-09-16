@@ -16,3 +16,4 @@ path = "src/main.rs"
 wavemark-core = { workspace = true, features = ["audio"] }
 anyhow = { workspace = true }
 gpui-kit = "0.6"
+rodio = "0.22"

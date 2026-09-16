@@ -23,6 +23,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::input::InputState;
 use gpui_kit::component::button::*;
 use gpui_kit::component::input::Input;
+use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::*;
 use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement as _};
 use gpui_kit::*;
@@ -72,10 +73,25 @@ fn tool(id: &'static str, icon: IconName, tip: &str) -> Button {
         .tooltip(tip.to_string())
 }
 
+/// The same button, outlined — used for toggles that are currently on, since
+/// gpui-component's `Button` has no `selected` state of its own.
+fn tool_on(id: &'static str, icon: IconName, tip: &str) -> Button {
+    Button::new(id)
+        .icon(icon)
+        .compact()
+        .outline()
+        .tooltip(tip.to_string())
+}
+
 pub struct Editor {
     pub state: AppState,
     /// Created lazily — `InputState::new` needs a `Window`.
     input: Option<Entity<InputState>>,
+    /// Volume slider. Also lazily created, and driven by rodio rather than by
+    /// the waveform, so it has to be a real widget and not a label.
+    volume: Option<Entity<SliderState>>,
+    /// True while the user is dragging the playhead along the ruler.
+    scrubbing: bool,
     /// Guards the playback ticker so we only ever run one.
     timer_running: bool,
 }
@@ -85,6 +101,8 @@ impl Editor {
         Self {
             state: AppState::default(),
             input: None,
+            volume: None,
+            scrubbing: false,
             timer_running: false,
         }
     }
@@ -156,18 +174,20 @@ impl Editor {
     }
 
     /// Drive the playhead while playing.
+    ///
+    /// The timer no longer *advances* the playhead — `poll_playback` reads the
+    /// output device's own position, so the cursor and the sound can't drift
+    /// apart. All this does is ask ~30×/second.
     fn ensure_timer(&mut self, cx: &mut Context<Self>) {
         if self.timer_running {
             return;
         }
         self.timer_running = true;
+        let period = Duration::from_millis(33);
         cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(33))
-                .await;
+            cx.background_executor().timer(period).await;
             let playing = this.update(cx, |this, cx| {
-                this.state.tick(0.033);
-                this.state.follow_playhead();
+                this.state.poll_playback();
                 cx.notify();
                 this.state.playing
             });
@@ -230,6 +250,9 @@ impl Editor {
                     self.ensure_timer(cx);
                 }
             }
+            "escape" => self.state.stop(),
+            "l" => self.state.toggle_loop(),
+            "m" => self.state.toggle_mute(),
             "home" => self.state.seek(0.0),
             "end" => self.state.seek(self.state.duration),
             "left" => {
@@ -311,6 +334,8 @@ impl Editor {
     fn toolbar(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let line = cx.theme().border;
         let playing = self.state.playing;
+        let looping = self.state.looping;
+        let muted = self.state.muted;
         let can_undo = self.state.can_undo();
         let can_redo = self.state.can_redo();
         let has_audio = self.state.has_audio();
@@ -319,6 +344,20 @@ impl Editor {
             tool("play-pause", IconName::Pause, "Pause (Space)")
         } else {
             tool("play-pause", IconName::Play, "Play (Space)")
+        };
+
+        // Loop is a toggle with no `selected` styling available, so it flips
+        // between ghost and outlined instead.
+        let loop_btn = if looping {
+            tool_on("loop", IconName::Repeat, "Loop on — click to turn off (L)")
+        } else {
+            tool("loop", IconName::Repeat, "Loop the selection (L)")
+        };
+
+        let mute_btn = if muted {
+            tool_on("mute", IconName::VolumeX, "Unmute (M)")
+        } else {
+            tool("mute", IconName::Volume2, "Mute (M)")
         };
 
         div()
@@ -354,6 +393,14 @@ impl Editor {
             )
             .child(divider(line))
             // transport
+            .child(
+                tool("rewind", IconName::Rewind, "Back to start (Home)")
+                    .disabled(!has_audio)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state.stop();
+                        cx.notify();
+                    })),
+            )
             .child(transport.on_click(cx.listener(|this, _, _, cx| {
                 if this.state.playing {
                     this.state.pause();
@@ -364,10 +411,18 @@ impl Editor {
                 cx.notify();
             })))
             .child(
-                tool("stop", IconName::Square, "Stop (Home)")
+                tool("stop", IconName::Square, "Stop (Esc)")
                     .disabled(!has_audio)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.state.stop();
+                        cx.notify();
+                    })),
+            )
+            .child(
+                loop_btn
+                    .disabled(!has_audio)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state.toggle_loop();
                         cx.notify();
                     })),
             )
@@ -446,11 +501,30 @@ impl Editor {
             )
             // Keep the groups left-aligned as the window grows.
             .child(div().flex_1())
+            // Output level. Parked at the far right so it reads as a playback
+            // control rather than an editing one, and so it never competes with
+            // the groups above for space.
+            .child(
+                mute_btn
+                    .disabled(!has_audio)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state.toggle_mute();
+                        cx.notify();
+                    })),
+            )
+            .child(match &self.volume {
+                Some(v) => div().w(px(72.0)).px_1().child(Slider::new(v)),
+                None => div().w(px(72.0)),
+            })
     }
 
     /// Tick marks and timestamps for the visible window. Without this the
     /// waveform is a shape with no scale on it.
-    fn ruler(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    ///
+    /// It doubles as the scrub strip: dragging here moves the playhead, which
+    /// is the one transport gesture that has nowhere else to live — the big
+    /// canvas is owned by range selection.
+    fn ruler(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let span = (self.state.view_end - self.state.view_start).max(f64::EPSILON);
         let ticks = 8usize;
 
@@ -460,7 +534,30 @@ impl Editor {
             .h(px(18.0))
             .flex_shrink_0()
             .border_b_1()
-            .border_color(cx.theme().border);
+            .border_color(cx.theme().border)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                    let f = this.frac_of(window, e.position.x);
+                    this.scrubbing = true;
+                    this.state.seek(this.state.time_at_frac(f));
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| {
+                if this.scrubbing {
+                    let f = this.frac_of(window, e.position.x);
+                    this.state.seek(this.state.time_at_frac(f));
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.scrubbing = false;
+                    cx.notify();
+                }),
+            );
 
         for i in 0..=ticks {
             let f = i as f32 / ticks as f32;
@@ -496,6 +593,9 @@ impl Editor {
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, window, cx| {
                     let f = this.frac_of(window, e.position.x);
+                    // A drag here selects a range, so it wins over any scrub
+                    // that began on the ruler and wandered down.
+                    this.scrubbing = false;
                     this.state.begin_drag(this.state.time_at_frac(f));
                     cx.notify();
                 }),
@@ -798,6 +898,14 @@ impl Editor {
             .map(|s| format!("sel {:.3} – {:.3} ({:.3}s)", s.start, s.end, s.duration()))
             .unwrap_or_else(|| "no selection".to_string());
 
+        // Where we are, and where the sound is going. The device rate matters
+        // because rodio resamples to it: if it differs from the file rate, that
+        // is the honest explanation for anything that sounds slightly off.
+        let head = match self.state.output_rate() {
+            Some(rate) => format!("▶ {:.2} s · out {} Hz", self.state.playhead, rate),
+            None => format!("▶ {:.2} s", self.state.playhead),
+        };
+
         div()
             .h_flex()
             .gap_3()
@@ -811,6 +919,8 @@ impl Editor {
             .child(div().text_xs().text_color(muted).child(format))
             .child(divider(cx.theme().border))
             .child(div().text_xs().text_color(muted).child(sel))
+            .child(divider(cx.theme().border))
+            .child(div().text_xs().text_color(muted).child(head))
             .child(divider(cx.theme().border))
             .child(
                 div()
@@ -830,12 +940,40 @@ impl Render for Editor {
         if self.input.is_none() {
             self.input = Some(cx.new(|cx| InputState::new(window, cx)));
         }
+        if self.volume.is_none() {
+            let v = self.state.volume;
+            let slider = cx.new(|_| {
+                SliderState::new()
+                    .min(0.0)
+                    .max(1.5)
+                    .step(0.01)
+                    .default_value(v)
+            });
+            // The slider owns the number; we push it into rodio. `Change` fires
+            // during the drag, `Release` once at the end — both mean the same
+            // thing to us, so there is no need to debounce.
+            cx.subscribe(&slider, |this, _, event: &SliderEvent, cx| {
+                let value = match event {
+                    SliderEvent::Change(v) | SliderEvent::Release(v) => v.end(),
+                };
+                this.state.set_volume(value);
+                cx.notify();
+            })
+            .detach();
+            self.volume = Some(slider);
+        }
         div()
             .v_flex()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_key_down(cx.listener(Self::on_key_down))
+            // Safety net: a scrub that ends outside the ruler would otherwise
+            // leave the playhead glued to the cursor.
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.scrubbing = false),
+            )
             .child(self.titlebar(cx))
             .child(self.toolbar(window, cx))
             .child(self.ruler(cx))

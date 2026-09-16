@@ -904,7 +904,7 @@ fn load(audio: &Path) -> Result<(wavemark_core::audio::DecodedAudio, usize)> {
 fn normalize_cmd(audio: &Path, out: &Path, target_dbfs: f32) -> Result<()> {
     let (mut d, _) = load(audio)?;
     let before = dsp::peak_dbfs(&d.samples);
-    let applied = dsp::normalize(&mut d.samples, target_dbfs);
+    let applied = dsp::normalize(d.samples_mut(), target_dbfs);
     write_wav(&d.samples, d.sample_rate, d.channels, out)?;
     println!(
         "normalized {:.1} dBFS -> {:.1} dBFS (applied {:+.2} dB) -> {}",
@@ -918,7 +918,7 @@ fn normalize_cmd(audio: &Path, out: &Path, target_dbfs: f32) -> Result<()> {
 
 fn gain_cmd(audio: &Path, out: &Path, db: f32) -> Result<()> {
     let (mut d, _) = load(audio)?;
-    let clipped = dsp::apply_gain(&mut d.samples, db);
+    let clipped = dsp::apply_gain(d.samples_mut(), db);
     write_wav(&d.samples, d.sample_rate, d.channels, out)?;
     println!(
         "applied {:+.2} dB -> {} ({:.1} dBFS peak)",
@@ -1059,7 +1059,7 @@ fn concat_cmd(files: &[PathBuf], out: &Path) -> Result<()> {
             None => chans = Some(d.channels),
             _ => {}
         }
-        parts.push(d.samples);
+        parts.push(d.into_samples());
     }
 
     let refs: Vec<&[f32]> = parts.iter().map(|p| p.as_slice()).collect();

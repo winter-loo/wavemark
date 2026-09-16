@@ -266,6 +266,9 @@ zooming and scrolling stay smooth on long files. Peaks are computed once
 | key | action |
 |---|---|
 | `space` | play / pause |
+| `esc` | stop and rewind to the start of the window |
+| `l` | toggle looping |
+| `m` | mute / unmute |
 | `←` `→` | seek 50 ms (hold `shift` for 1 s) |
 | `home` / `end` | jump to start / end |
 | `+` / `-` | zoom around the centre |
@@ -274,6 +277,9 @@ zooming and scrolling stay smooth on long files. Peaks are computed once
 | `e` | export the current selection |
 | `delete` | delete the annotation under the selection |
 | `⌘Z` / `ctrl+Z` | undo (`shift` to redo) |
+
+Drag along the **time ruler** to scrub the playhead. Dragging on the big
+waveform selects a range instead.
 
 Bare letter keys are ignored while the annotation composer has focus, so typing
 a note never triggers a shortcut.
@@ -296,7 +302,7 @@ the usual X11/Wayland dev packages:
 sudo apt install -y \
   libxkbcommon-x11-dev libx11-dev libxext-dev libxft-dev libxinerama-dev \
   libxcursor-dev libxrender-dev libxfixes-dev libwayland-dev libxkbfile-dev \
-  libssl-dev pkg-config cmake
+  libssl-dev libasound2-dev pkg-config cmake
 
 cargo build -p wavemark-ui
 ```
@@ -326,15 +332,19 @@ Milestones:
 |---|---|---|
 | **v0.1 — Core loop** | two waveforms, sidecar session, CLI hand-off to an agent | complete |
 | **v0.2 — AI round-trip** | batch export, and merging an agent's findings back into the session | complete |
-| **v0.3 — Everyday editing** | silence detection, normalize/gain/cut/split/concat, keyboard shortcuts + undo, audible playback | 4 of 5 done |
+| **v0.3 — Everyday editing** | silence detection, normalize/gain/cut/split/concat, keyboard shortcuts + undo, audible playback | complete |
 
 Two things worth knowing before you pick something up:
 
-- **There is no audio output device yet.** The transport (`play`/`pause`/`stop`/
-  `seek`) is fully implemented and the playhead renders correctly, but nothing
-  comes out of your speakers. This is the one open ticket in v0.3.
+- **Playback is real, and the device is the clock.** `play` goes out through
+  rodio, the playhead is read back from the output device rather than advanced
+  on a timer (so it cannot drift from the sound), and drag-scrubbing on the
+  ruler seeks the live stream. If the machine has no output device, the GUI says
+  so in the status bar and everything else keeps working.
 - **The GUI is not built in CI.** gpui-kit needs display/system libraries that
   vary per runner. Only `wavemark-core` and `wavemark-cli` are checked on push.
+- **The audio device is opened lazily**, on the first play/stop/seek — not at
+  startup — so opening a file on a headless box never fails.
 
 ## License
 

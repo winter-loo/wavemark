@@ -10,6 +10,8 @@ use wavemark_core::audio::{decode, export_range, DecodedAudio};
 use wavemark_core::silence::{detect_silence, SilenceOptions};
 use wavemark_core::{Annotation, Peaks, Session, TimeRange};
 
+use crate::audio::AudioEngine;
+
 /// Peak resolution stored for the whole file. 100 buckets/sec is plenty of
 /// detail; both the main canvas and the overview bar down-sample from this.
 const PEAKS_PER_SECOND: usize = 100;
@@ -43,6 +45,16 @@ pub struct AppState {
 
     pub playhead: f64,
     pub playing: bool,
+    /// Repeat the play window instead of stopping at its end.
+    pub looping: bool,
+    pub volume: f32,
+    pub muted: bool,
+
+    /// The output device. `None` until first use, so a machine with no sound
+    /// card still opens, browses, marks and exports perfectly happily.
+    audio_out: Option<AudioEngine>,
+    /// Why we have no output device. Reported once, then left alone.
+    audio_error: Option<String>,
 
     /// Snapshots of `session` before each mutation. Undo/redo only ever tracks
     /// the *session* — never audio samples, which would be absurd.
@@ -67,6 +79,11 @@ impl Default for AppState {
             drag_from: None,
             playhead: 0.0,
             playing: false,
+            looping: false,
+            volume: 1.0,
+            muted: false,
+            audio_out: None,
+            audio_error: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             status: "open an audio file to begin".into(),
@@ -83,6 +100,9 @@ impl AppState {
         let audio = decode(path).with_context(|| format!("decoding {}", path.display()))?;
         let peaks = audio.peaks((audio.duration_sec * PEAKS_PER_SECOND as f64).ceil() as usize);
         self.duration = audio.duration_sec;
+        // Hand the very same samples to the output device — no copy, so a long
+        // recording is not held twice in memory.
+        let (samples, rate, channels) = (audio.samples.clone(), audio.sample_rate, audio.channels);
         self.audio = Some(audio);
         self.peaks = Some(peaks);
         self.audio_path = Some(path.to_path_buf());
@@ -90,9 +110,13 @@ impl AppState {
         self.view_start = 0.0;
         self.view_end = self.duration;
         self.playhead = 0.0;
+        self.playing = false;
         self.selection = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        if let Some(eng) = self.audio_out.as_mut() {
+            eng.load(samples, channels, rate);
+        }
 
         // Load the sidecar if it exists, otherwise start a fresh session. The
         // sidecar is how annotations reach the CLI.
@@ -405,35 +429,156 @@ impl AppState {
 
     // ---- playback -----------------------------------------------------------
 
+    /// Run `f` against the output device, opening it on first use.
+    ///
+    /// The device is opened lazily so that a machine with no sound card — a
+    /// headless box, a container, a locked-down Pulse setup — still gets a
+    /// perfectly usable editor, minus the sound.
+    fn with_engine<R>(&mut self, f: impl FnOnce(&mut AudioEngine) -> R) -> Result<R, String> {
+        if self.audio_out.is_none() && self.audio_error.is_none() {
+            match AudioEngine::open() {
+                Ok(mut eng) => {
+                    if let Some(a) = &self.audio {
+                        eng.load(a.samples.clone(), a.channels, a.sample_rate);
+                    }
+                    eng.set_volume(self.volume);
+                    eng.set_muted(self.muted);
+                    self.audio_out = Some(eng);
+                }
+                Err(e) => self.audio_error = Some(e),
+            }
+        }
+        let missing = self
+            .audio_error
+            .clone()
+            .unwrap_or_else(|| "no output device".to_string());
+        self.audio_out.as_mut().map(f).ok_or(missing)
+    }
+
+    /// What pressing play covers: the selection when the playhead sits inside
+    /// it, otherwise everything from the playhead to the end of the file.
+    ///
+    /// Sitting exactly *at* the end counts as "before it", so pressing play
+    /// after a run-out replays the window instead of arming a zero-length one
+    /// that finishes instantly.
+    #[must_use]
+    pub fn play_window(&self) -> (f64, f64) {
+        match self.selection {
+            Some(s) if self.playhead >= s.start - 1e-6 && self.playhead < s.end - 1e-3 => {
+                (self.playhead.max(s.start), s.end)
+            }
+            Some(s) => (s.start, s.end),
+            None if self.playhead < self.duration - 1e-3 => (self.playhead, self.duration),
+            None => (0.0, self.duration),
+        }
+    }
+
+    /// Where a loop restarts: the selection, or the whole file.
+    #[must_use]
+    pub fn loop_window(&self) -> (f64, f64) {
+        match self.selection {
+            Some(s) => (s.start, s.end),
+            None => (0.0, self.duration),
+        }
+    }
+
+    /// End of whatever `t` would play to — used when seeking, so a jump inside
+    /// the selection keeps playing just the selection.
+    #[must_use]
+    pub fn window_end_for(&self, t: f64) -> f64 {
+        match self.selection {
+            Some(s) if t >= s.start - 1e-6 && t <= s.end + 1e-6 => s.end,
+            _ => self.duration,
+        }
+    }
+
     pub fn play(&mut self) {
-        if self.has_audio() {
-            self.playing = true;
+        if !self.has_audio() {
+            return;
+        }
+        let (from, to) = self.play_window();
+        match self.with_engine(|eng| {
+            if eng.can_resume(from, to) {
+                eng.resume();
+            } else {
+                eng.start(from, to);
+            }
+        }) {
+            Ok(()) => {
+                self.playing = true;
+                self.status = format!("playing {:.3} → {:.3}", from, to);
+            }
+            Err(e) => {
+                self.playing = false;
+                self.status = format!("no audio output — {e}");
+            }
         }
     }
 
     pub fn pause(&mut self) {
-        self.playing = false;
-    }
-
-    pub fn stop(&mut self) {
-        self.playing = false;
-        self.playhead = 0.0;
-    }
-
-    pub fn seek(&mut self, t: f64) {
-        self.playhead = t.clamp(0.0, self.duration);
-    }
-
-    /// Advance the playhead by `dt` seconds; stops at the end of the file (or
-    /// at the end of the selection when looping a selection).
-    pub fn tick(&mut self, dt: f64) {
         if !self.playing {
             return;
         }
-        self.playhead += dt;
-        let limit = self.selection.map(|s| s.end).unwrap_or(self.duration);
-        if self.playhead >= limit {
-            self.playhead = self.selection.map(|s| s.start).unwrap_or(0.0);
+        let _ = self.with_engine(|eng| eng.pause());
+        self.playing = false;
+        self.status = format!("paused at {:.3}", self.playhead);
+    }
+
+    /// Stop and rewind to the start of the loop window.
+    pub fn stop(&mut self) {
+        let (from, to) = self.loop_window();
+        if self.has_audio() {
+            let _ = self.with_engine(|eng| eng.park(from, to));
+        }
+        self.playing = false;
+        self.playhead = from;
+        self.status = format!("stopped at {:.3}", from);
+    }
+
+    pub fn seek(&mut self, t: f64) {
+        let t = t.clamp(0.0, self.duration);
+        self.playhead = t;
+        if !self.has_audio() {
+            return;
+        }
+        let to = self.window_end_for(t);
+        let _ = self.with_engine(|eng| eng.seek(t, to));
+    }
+
+    /// Read the device clock and handle running off the end of the window.
+    ///
+    /// This replaces the old `tick(0.033)`, which advanced a playhead on a fixed
+    /// timer: it silently drifted away from the audio within seconds, and it was
+    /// the only "playback" there was. The device is now the clock.
+    pub fn poll_playback(&mut self) {
+        if !self.playing {
+            return;
+        }
+        let (pos, done) = {
+            let Some(eng) = self.audio_out.as_mut() else {
+                self.playing = false;
+                return;
+            };
+            (eng.position(), eng.finished())
+        };
+        if !done {
+            self.playhead = pos;
+            self.follow_playhead();
+            return;
+        }
+        let (from, to) = self.loop_window();
+        if self.looping {
+            if let Some(eng) = self.audio_out.as_mut() {
+                eng.start(from, to);
+            }
+            self.playhead = from;
+        } else {
+            if let Some(eng) = self.audio_out.as_mut() {
+                eng.pause();
+            }
+            self.playing = false;
+            self.playhead = to;
+            self.status = format!("stopped at {:.3}", to);
         }
     }
 
@@ -442,6 +587,46 @@ impl AppState {
         if self.playhead < self.view_start || self.playhead > self.view_end {
             self.focus(self.playhead);
         }
+    }
+
+    /// Sample rate the output device runs at, when we have one. Shown in the
+    /// status bar so a resampling mismatch is visible rather than mysterious.
+    #[must_use]
+    pub fn output_rate(&self) -> Option<u32> {
+        self.audio_out.as_ref().map(|e| e.output_rate())
+    }
+
+    pub fn set_volume(&mut self, v: f32) {
+        self.volume = v.clamp(0.0, 1.5);
+        if self.volume > 0.0 {
+            self.muted = false;
+        }
+        let v = self.volume;
+        let m = self.muted;
+        let _ = self.with_engine(|eng| {
+            eng.set_volume(v);
+            eng.set_muted(m);
+        });
+    }
+
+    pub fn toggle_mute(&mut self) {
+        self.muted = !self.muted;
+        let m = self.muted;
+        let _ = self.with_engine(|eng| eng.set_muted(m));
+        self.status = if self.muted {
+            "muted".to_string()
+        } else {
+            format!("volume {:.0}%", self.volume * 100.0)
+        };
+    }
+
+    pub fn toggle_loop(&mut self) {
+        self.looping = !self.looping;
+        self.status = if self.looping {
+            "loop on — playback repeats the window".to_string()
+        } else {
+            "loop off".to_string()
+        };
     }
 
     /// Run silence detection and add each run as an `auto:silence` annotation.

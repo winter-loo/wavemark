@@ -6,6 +6,7 @@
 //! CLI reads so an AI agent can consume it.
 
 mod app;
+mod audio;
 mod state;
 
 use gpui_kit::component::{ActiveTheme, Root, TitleBar};

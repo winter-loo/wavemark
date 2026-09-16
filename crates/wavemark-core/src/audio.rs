@@ -7,6 +7,7 @@
 
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
@@ -17,17 +18,39 @@ use symphonia::core::probe::Hint;
 use crate::model::TimeRange;
 
 /// Decoded audio: interleaved f32 samples in `[-1, 1]` across all channels.
+///
+/// The samples sit behind an `Arc` so a GUI can hand the very same buffer to
+/// its audio thread without copying it — a two hour recording is a couple of
+/// gigabytes of f32, and duplicating that just to play it is not an option.
 pub struct DecodedAudio {
     pub sample_rate: u32,
     pub channels: u16,
     pub duration_sec: f64,
-    pub samples: Vec<f32>,
+    pub samples: Arc<Vec<f32>>,
 }
 
 impl DecodedAudio {
     /// Build a [crate::Peaks] overview at `bucket_count` resolution.
     pub fn peaks(&self, bucket_count: usize) -> crate::Peaks {
         crate::Peaks::from_interleaved(&self.samples, self.sample_rate, self.channels, bucket_count)
+    }
+
+    /// Mutable access to the samples, cloning only if the buffer is shared.
+    ///
+    /// This is the one way to get a `&mut [f32]`; the field itself is behind an
+    /// `Arc` and therefore not directly mutable.
+    pub fn samples_mut(&mut self) -> &mut [f32] {
+        Arc::make_mut(&mut self.samples).as_mut_slice()
+    }
+
+    /// Move the samples out, cloning only if the buffer is shared.
+    pub fn into_samples(self) -> Vec<f32> {
+        match Arc::try_unwrap(self.samples) {
+            Ok(v) => v,
+            // Not worth panicking over: `Arc::make_mut` on a shared buffer
+            // would clone too, this just says so plainly.
+            Err(a) => (*a).clone(),
+        }
     }
 }
 
@@ -99,7 +122,7 @@ pub fn decode(path: &Path) -> Result<DecodedAudio> {
         sample_rate,
         channels,
         duration_sec,
-        samples,
+        samples: Arc::new(samples),
     })
 }
 

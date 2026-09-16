@@ -13,6 +13,48 @@ screenshot.** Layout maths, colour values and handler coverage are verified;
 
 ---
 
+## Resolved since this review (v0.1.0-rc.3)
+
+| # | What changed |
+|---|---|
+| **P1** | Time ruler added above the main waveform, with tick precision that follows the zoom. |
+| **P4** | **Real audio output.** New `crates/wavemark-ui/src/audio.rs` owns a rodio `MixerDeviceSink`. `play` now makes sound. |
+| **P5** | **The device is the clock.** `tick(0.033)` is gone; `poll_playback()` reads `Player::get_pos()`, so the playhead cannot drift from the audio. |
+| **P6** | **Scrubbing works** — drag on the time ruler seeks the live stream. |
+
+### How P4 was verified without a sound card
+
+The container has no `/dev/snd`, so `~/.asoundrc` was pointed at ALSA's `file`
+plugin and the captured stream was analysed:
+
+```text
+device rate      44100 Hz  (rodio resamples our 48 kHz source)
+non-zero frames  44100     = exactly 1.000 s of a 1 s source
+dominant tone    440.0 Hz  (the test tone, exactly)
+peak             0.24999   (source amplitude 0.25, unclipped)
+window [0.5,0.75) ends at 0.750 s  — no overshoot, no run-on
+muted            all-zero frames, playback still advances
+```
+
+That is `cargo test -p wavemark-ui` with `WAVEMARK_AUDIO_TEST=1`; without the
+variable the device test skips, so CI (no sound card) stays green.
+
+### Design notes worth keeping
+
+- **`DecodedAudio::samples` is now `Arc<Vec<f32>>`.** The GUI hands the audio
+  thread the decoder's own buffer instead of copying it — a two-hour recording
+  is a couple of gigabytes of f32.
+- **One `Player` per armed window, not one per app.** `Player::clear()` sleeps
+  until the old sound drains, which on the UI thread could block for minutes;
+  dropping a `Player` is non-blocking.
+- **The source is bounded, not timer-truncated.** `PcmSource` covers
+  `[start, end)` and simply runs out, so "play the selection" ends *at* the
+  selection.
+- **The device is opened lazily**, on the first play/stop/seek, so a machine
+  with no sound card still gets a usable editor and a one-line status message.
+
+---
+
 ## P0 — the product's core promise is not reachable from the UI
 
 The whole pitch is *"select a range, annotate it, and hand exact time ranges to
@@ -23,9 +65,9 @@ an agent."* Three of the UI's sharpest edges are on exactly that path.
 | **P1** | **No time ruler on either waveform.** You cannot tell what second you are looking at. The only time readout is `sel: x – y s` in the header. For a tool whose output is timestamps, this is the single biggest UI omission. | `app.rs:364` `waveform()`, `app.rs:464` `overview()` |
 | **P2** | **No way to set an exact range.** Selection is drag-only — no numeric entry, no snap, no editable start/end fields. "确切的时间点" currently means "wherever your mouse happened to stop." | `app.rs:379-401` |
 | **P3** | **Selection has no drag handles.** Miss by 30 ms and you re-drag from scratch. | `state.rs:231-248` |
-| **P4** | **Playback is silent** (issue #27). Play/Pause/Stop move a red line and nothing else. Three transport buttons that don't transport. | no `rodio`/`cpal` in `Cargo.lock` |
-| **P5** | **Playhead drift.** `tick(0.033)` is called on a fixed 33 ms timer, so it adds a fixed 33 ms regardless of actual elapsed time. Any frame over budget and the playhead runs slow. Should measure wall-clock delta. | `app.rs:117-131`, `state.rs:429` |
-| **P6** | **No scrub.** You cannot drag the playhead. Universal in every audio editor. | `app.rs:449-459` |
+| ~~**P4**~~ | ~~**Playback is silent**~~ — **fixed in rc.3**, see above. | `audio.rs` |
+| ~~**P5**~~ | ~~**Playhead drift.**~~ — **fixed in rc.3**: the device is the clock now. | `state.rs` `poll_playback()` |
+| ~~**P6**~~ | ~~**No scrub.**~~ — **fixed in rc.3**: drag on the ruler. | `app.rs` `ruler()` |
 
 ## P1 — navigation is missing its most-used verbs
 
@@ -95,8 +137,10 @@ application*.
 
 ## Suggested order
 
-1. **P4 audio output** — without it the transport is decorative, and it's already #27.
-2. **P1 time ruler + P2/P3 precise selection** — these *are* the product.
-3. **P5/P6 playback correctness + scrub**, then **N1 wheel pan/zoom**.
-4. **L1–L4 desktop integration** — cheap, and it's what makes it a Linux app rather than a binary.
+Updated after rc.3 — P1, P4, P5 and P6 are done.
+
+1. **P2/P3 precise selection** — numeric entry and drag handles. These *are* the product.
+2. **N1 wheel pan/zoom**, then **N2 keyboard pan**.
+3. **L1–L4 desktop integration** — cheap, and it's what makes it a Linux app rather than a binary.
+4. **L6 argv** — `wavemark-ui file.wav` should open the file; it also unblocks MIME "open with".
 5. **U7/U8/U9/U12 annotation panel**, then **U1/U2/U3 theme and chrome**.
