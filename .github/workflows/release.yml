@@ -232,7 +232,7 @@ jobs:
           echo "WM=$bindir/wavemark.exe" >> "$GITHUB_ENV"
 
       - name: wavemark --version
-        run: "$WM" --version
+        run: '"$WM" --version'
 
       - name: Round-trip a generated file
         run: |

@@ -9,6 +9,25 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # An invalid workflow file produces a run with zero jobs and no logs, which
+  # is a miserable thing to debug from a tag push. Cheap to check up front.
+  lint-workflows:
+    name: lint workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          v=1.7.7
+          curl -sSL -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v$v/actionlint_${v}_linux_amd64.tar.gz"
+          sudo tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
+
+      - name: Lint
+        run: actionlint -ignore 'runner-label .* is deprecated'
+
   core-and-cli:
     name: build + test core & cli
     runs-on: ubuntu-latest
