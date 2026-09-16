@@ -249,8 +249,17 @@ impl AudioEngine {
     /// it we have to rebuild the source, and `to` becomes the new end.
     pub fn seek(&mut self, t: f64, to: f64) {
         let resume = self.playing;
+        // Only seek into a window that still has audio left in it. `try_seek`
+        // blocks until the audio thread services the source, and a source that
+        // has already run out is never serviced again — so seeking an exhausted
+        // window would hang the caller. Re-arming instead is always safe.
         let inside = match &self.player {
-            Some(p) => !p.empty() && t >= self.from - 1e-6 && t <= self.to + 1e-6,
+            Some(p) => {
+                !p.empty()
+                    && t >= self.from - 1e-6
+                    && t <= self.to + 1e-6
+                    && p.get_pos().as_secs_f64() < (self.to - self.from) - 0.002
+            }
             None => false,
         };
         if inside {
